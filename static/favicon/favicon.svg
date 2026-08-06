@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500">
+  <defs>
+    <style>
+      .c-text {
+        font-family: "DejaVu Sans", "Arial", sans-serif;
+        font-weight: 700;
+        font-size: 320px;
+        fill: #000;
+      }
+    </style>
+  </defs>
+  <circle cx="250.0" cy="250.0" r="210" fill="#fff"/>
+  <text x="50%" y="52%" text-anchor="middle" dominant-baseline="middle" class="c-text">C</text>
+</svg>
