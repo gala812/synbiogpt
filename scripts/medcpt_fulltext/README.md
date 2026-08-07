@@ -14,7 +14,7 @@
 
 ## MedCPT 长度保护
 
-业务规则以 180–260 words 为目标、320 words 为硬上限。程序额外应用 448 MedCPT tokens 硬上限，为后续标题、章节前缀和 BERT 特殊token保留空间。若单个句子本身超限，先尝试在分号/冒号处拆分；仍超限时才在单词边界强制拆分并记录警告。
+业务规则以 180–260 words 为目标、320 words 为硬上限。448 MedCPT tokens硬上限应用于完整的 `Title + Section + Text` Embedding输入，而不只是正文。若单个句子本身超限，先尝试在分号/冒号处拆分；仍超限时才在单词边界强制拆分并记录警告。
 
 默认加载 `ncbi/MedCPT-Article-Encoder` tokenizer。生产试运行建议明确要求该 tokenizer，避免静默使用回退计数器：
 
@@ -31,12 +31,14 @@ cd /path/to/synbiogpt3
 
 python scripts/chunk_mineru_markdown.py \
   --input-dir /qiannanhu01_nfs/pdf_parse/jsonl_backup/output \
-  --output-dir /qiannanhu01_nfs/pdf_parse/jsonl_backup/medcpt_visual_chunks_v1/pilot_500 \
-  --inventory-db /qiannanhu01_nfs/pdf_parse/jsonl_backup/medcpt_visual_chunks_v1/article_inventory.sqlite3 \
+  --output-dir /qiannanhu01_nfs/synbiogpt/backend/data/500PDF_r5 \
+  --inventory-db /qiannanhu01_nfs/synbiogpt/backend/data/article_inventory.sqlite3 \
   --refresh-inventory \
   --limit 500 \
   --workers 8 \
-  --require-medcpt-tokenizer
+  --tokenizer /qiannanhu01_nfs/models/MedCPT/Article-Encoder \
+  --require-medcpt-tokenizer \
+  --local-files-only
 ```
 
 可靠Markdown H1会直接作为论文标题。若确实需要补充解析耗时和 `source_file`，再增加：
@@ -74,6 +76,8 @@ duplicate_resolution.jsonl
 ```
 
 `figures_tables.jsonl` 只记录 Markdown 中能够识别的图表、相对图片路径、caption和相邻引用上下文。表格只有JPG时始终设置 `table_text_missing=true`，程序不调用OCR，也不会虚构表格单元格。
+
+`chunks.jsonl` 不重复保存完整Embedding文本。后续Embedding程序流式读取 `paper_title`、`section`、`subsection` 和 `text`，调用同一个 `build_embedding_text()` 函数按batch临时拼接。`token_count`是完整输入的token数，`text_token_count`仅记录正文token数。
 
 ## 检查顺序
 

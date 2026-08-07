@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.medcpt_fulltext.chunking import create_chunks
+from scripts.medcpt_fulltext.chunking import build_embedding_text, create_chunks
 from scripts.medcpt_fulltext.markdown_parser import parse_document
 from scripts.medcpt_fulltext.models import ChunkingConfig
 from scripts.medcpt_fulltext.pipeline import discover_documents, run_pipeline
@@ -109,6 +109,19 @@ def test_chunking_enforces_limits_parents_and_stable_ids(tmp_path: Path) -> None
     assert len(chunks1) >= 3
     assert all(chunk["word_count"] <= 320 for chunk in chunks1)
     assert all(chunk["token_count"] <= 448 for chunk in chunks1)
+    assert all(
+        chunk["token_count"]
+        == tokenizer.count(
+            build_embedding_text(
+                chunk["paper_title"],
+                chunk["section"],
+                chunk["subsection"],
+                chunk["text"],
+            )
+        )
+        for chunk in chunks1
+    )
+    assert all(chunk["text_token_count"] == tokenizer.count(chunk["text"]) for chunk in chunks1)
     assert all(chunk["parent_chunk_id"] for chunk in chunks1)
     assert chunks1[0]["previous_chunk_id"] is None
     assert chunks1[-1]["next_chunk_id"] is None
@@ -231,6 +244,75 @@ def test_does_not_repair_unverified_number_inside_heading(tmp_path: Path) -> Non
     assert "possible_page_merged_heading_unverified" in document.parse_warnings
 
 
+def test_recovers_h2_title_and_excludes_publisher_headings_and_panel_labels(
+    tmp_path: Path,
+) -> None:
+    markdown = f"""## Viewpoint
+
+## Genetic Engineering and the Clinician
+
+## Open access
+
+## A B S T R A C T
+
+{_words('abstract', 90)}
+
+## Results
+
+(a)
+B)
+(Continued)
+Merged
+
+I
+
+50%
+
+{_words('result', 100)}
+"""
+    path = _write_paper(tmp_path, "PMC0000007", markdown, ["unused.jpg"])
+    document = parse_document(path, "PMC0000007")
+
+    assert document.paper_title == "Genetic Engineering and the Clinician"
+    assert document.title_source == "markdown_h2_fallback"
+    assert "title_recovered_from_markdown_h2" in document.parse_warnings
+    assert document.excluded_counts["publisher_heading"] == 1
+    assert document.excluded_counts["figure_panel_artifact"] == 1
+    assert document.excluded_counts["isolated_text_fragment"] == 2
+    assert "Abstract" in document.section_tree
+
+
+def test_binds_conservatively_mangled_figure_and_table_captions(tmp_path: Path) -> None:
+    markdown = f"""# Reliable Study of Engineered Biological Systems
+
+## Results
+
+{_words('result', 100)}
+
+![](images/figure2.jpg)
+
+e 2. Fermentation response across engineered strains.
+
+able 1. Engineered strains used in fermentation.
+
+![](images/table1.jpg)
+"""
+    path = _write_paper(
+        tmp_path,
+        "PMC0000008",
+        markdown,
+        ["figure2.jpg", "table1.jpg"],
+    )
+    document = parse_document(path, "PMC0000008")
+
+    assert [(asset.asset_type, asset.label) for asset in document.assets] == [
+        ("figure", "Figure 2"),
+        ("table", "Table 1"),
+    ]
+    assert document.assets[0].image_paths == ["images/figure2.jpg"]
+    assert document.assets[1].image_paths == ["images/table1.jpg"]
+
+
 def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "output"
@@ -305,7 +387,8 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
         "chunk_id", "doc_id", "pmcid", "paper_title", "section", "subsection",
         "section_path", "chunk_type", "chunk_index", "parent_chunk_id", "text",
         "word_count", "token_count", "char_start", "char_end", "previous_chunk_id",
-        "next_chunk_id", "image_paths", "figure_ids", "table_ids", "source_file",
+        "text_token_count", "next_chunk_id", "image_paths", "figure_ids",
+        "table_ids", "source_file",
         "parse_warnings",
     }
     assert required_chunk_fields.issubset(rows[0])

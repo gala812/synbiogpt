@@ -25,7 +25,7 @@ from .tokenization import MEDCPT_TOKENIZER, TokenCounter, resolve_tokenizer
 
 
 SCHEMA_VERSION = "medcpt_markdown_chunk_v1"
-PIPELINE_REVISION = "pilot_rules_r4"
+PIPELINE_REVISION = "pilot_rules_r5"
 INVENTORY_SCHEMA_VERSION = 1
 PMCID_RE = re.compile(r"^PMC\d+$", re.I)
 JSON_ID_RE = re.compile(rb'"(?:id|doc_id|pmcid)"\s*:\s*"(PMC\d+)"', re.I)

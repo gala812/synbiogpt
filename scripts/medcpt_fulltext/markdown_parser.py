@@ -18,7 +18,11 @@ FIGURE_CAPTION_RE = re.compile(r"^\s*(?P<label>(?:Figure|Fig\.)\s+(?:S?\d+[A-Za-
 EMBEDDED_TABLE_CAPTION_RE = re.compile(r"(?<!\w)(?P<label>Table\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:]\s*(?P<body>.*)$", re.I | re.S)
 EMBEDDED_FIGURE_CAPTION_RE = re.compile(r"(?<!\w)(?P<label>(?:Figure|Fig\.)\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:]\s*(?P<body>.*)$", re.I | re.S)
 MANGLED_FIGURE_CAPTION_RE = re.compile(
-    r"^\s*(?P<label>(?:igure|gure|ure)\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:]\s*(?P<body>.*)$",
+    r"^\s*(?P<label>(?:igure|gure|ure|re|e)\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:]\s*(?P<body>.*)$",
+    re.I | re.S,
+)
+MANGLED_TABLE_CAPTION_RE = re.compile(
+    r"^\s*(?P<label>(?:able|ble)\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:]\s*(?P<body>.*)$",
     re.I | re.S,
 )
 
@@ -52,6 +56,31 @@ PANEL_COMPARISON_RE = re.compile(
     r"^(?:[A-Z]+\d*|R\d+|S\d+)\s*[-:]?\s*vs\.?\s*[-:]?\s*(?:[A-Z]+\d*|R\d+|S\d+)$",
     re.I,
 )
+PANEL_LABEL_RE = re.compile(
+    r"^\s*(?:\(?[A-Ha-h]\)?[.)]?|\(?continued\)?|merged)\s*$",
+    re.I,
+)
+
+PUBLISHER_HEADING_KEYS = {
+    "article",
+    "article info",
+    "articleinfo",
+    "citation",
+    "copyright",
+    "correspondence",
+    "graphical abstract",
+    "highlights",
+    "open access",
+    "specialty section",
+}
+PUBLISHER_HEADING_PREFIXES = (
+    "academic editor",
+    "check for update",
+    "citation ",
+    "copyright ",
+    "open access ",
+    "ready to submit your research",
+)
 
 EXCLUDED_SECTION_KEYS = {
     "acknowledgement",
@@ -71,12 +100,18 @@ EXCLUDED_SECTION_KEYS = {
     "author details",
     "keywords",
     "keyword",
+    "data availability",
+    "data availability statement",
+    "declaration of competing interest",
 }
 
 
 def normalize_heading_key(text: str) -> str:
     value = re.sub(r"[*_`#]", "", text).strip()
     value = re.sub(r"^\s*(?:\d+(?:\.\d+)*\.?|[IVXLC]+\.?)\s+", "", value, flags=re.I)
+    letters = value.split()
+    if len(letters) >= 4 and all(len(letter) == 1 and letter.isalpha() for letter in letters):
+        value = "".join(letters)
     value = value.replace("&", " and ").replace("–", "-").replace("—", "-")
     value = re.sub(r"[-_/]+", " ", value)
     value = re.sub(r"[^A-Za-z0-9 ]+", " ", value)
@@ -119,6 +154,11 @@ def _is_excluded_heading(text: str) -> bool:
     return normalize_heading_key(text) in EXCLUDED_SECTION_KEYS
 
 
+def _is_publisher_heading(text: str) -> bool:
+    key = normalize_heading_key(text)
+    return key in PUBLISHER_HEADING_KEYS or key.startswith(PUBLISHER_HEADING_PREFIXES)
+
+
 def _clean_text(text: str) -> str:
     text = text.replace("\x00", "")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
@@ -154,10 +194,21 @@ def _is_figure_panel_artifact(text: str) -> bool:
         and re.search(r"\bFigure\s+S?\d+[A-Za-z]?\.\s*Cont\.?", text, re.I)
     ):
         return True
-    return all(
+    return bool(PANEL_LABEL_RE.fullmatch(text)) or all(
         PANEL_COMPARISON_RE.fullmatch(line)
-        or re.fullmatch(r"[A-Ha-h]", line)
+        or PANEL_LABEL_RE.fullmatch(line)
         for line in lines
+    )
+
+
+def _is_isolated_text_fragment(text: str) -> bool:
+    """Drop tiny OCR/table fragments that cannot form a useful retrieval unit."""
+
+    words = text.split()
+    return (
+        0 < len(words) <= 3
+        and len(text) <= 40
+        and not re.search(r"[.!?][\"')\]]?\s*$", text)
     )
 
 
@@ -244,7 +295,9 @@ def _valid_title(text: str) -> bool:
     if canonical_main_section(cleaned) or _is_excluded_heading(cleaned):
         return False
     key = normalize_heading_key(cleaned)
-    if key in {"article", "research article", "original article", "review"}:
+    if key in {
+        "article", "research article", "original article", "review", "viewpoint"
+    } or _is_publisher_heading(cleaned):
         return False
     return len(re.sub(r"[^A-Za-z0-9]", "", cleaned)) >= 12
 
@@ -421,9 +474,12 @@ def _assign_structure_and_exclusions(
                 if main == "References":
                     references_seen = True
                 section_tree.setdefault(section, [])
-            elif block.heading_level == 1 and normalize_heading_key(block.text) == normalized_title:
+            elif normalize_heading_key(block.text) == normalized_title:
                 block.excluded_reason = "paper_title"
                 excluded["paper_title"] += 1
+            elif _is_publisher_heading(block.text):
+                block.excluded_reason = "publisher_heading"
+                excluded["publisher_heading"] += 1
             elif _is_excluded_heading(block.text):
                 subsection = block.text
                 excluded_section = True
@@ -477,6 +533,10 @@ def _assign_structure_and_exclusions(
             block.excluded_reason = "figure_panel_artifact"
             excluded["figure_panel_artifact"] += 1
             continue
+        if block.kind == "paragraph" and _is_isolated_text_fragment(block.text):
+            block.excluded_reason = "isolated_text_fragment"
+            excluded["isolated_text_fragment"] += 1
+            continue
         if section == "Front Matter" and block.kind != "image":
             block.excluded_reason = "front_matter"
             excluded["front_matter"] += 1
@@ -517,6 +577,9 @@ def _caption_match(block: SourceBlock) -> tuple[str, re.Match[str]] | None:
     table = TABLE_CAPTION_RE.match(block.text)
     if table:
         return "table", table
+    table = MANGLED_TABLE_CAPTION_RE.match(block.text)
+    if table:
+        return "table", table
     figure = FIGURE_CAPTION_RE.match(block.text)
     if figure:
         return "figure", figure
@@ -524,16 +587,28 @@ def _caption_match(block: SourceBlock) -> tuple[str, re.Match[str]] | None:
     if figure:
         return "figure", figure
     table = EMBEDDED_TABLE_CAPTION_RE.search(block.text)
-    if table and len(
-        re.findall(re.escape(table.group("label")), block.text, re.I)
-    ) >= 2:
+    if table and _embedded_caption_is_repeated_or_mangled(block.text, table, "table"):
         return "table", table
     figure = EMBEDDED_FIGURE_CAPTION_RE.search(block.text)
-    if figure and len(
-        re.findall(re.escape(figure.group("label")), block.text, re.I)
-    ) >= 2:
+    if figure and _embedded_caption_is_repeated_or_mangled(block.text, figure, "figure"):
         return "figure", figure
     return None
+
+
+def _embedded_caption_is_repeated_or_mangled(
+    text: str,
+    match: re.Match[str],
+    asset_type: str,
+) -> bool:
+    label = match.group("label")
+    if len(re.findall(re.escape(label), text, re.I)) >= 2:
+        return True
+    number = re.search(r"\b(S?\d+[A-Za-z]?|[IVXLC]+)\b", label, re.I)
+    if not number:
+        return False
+    prefix = text[: match.start()]
+    stem = r"(?:e|re|ure|gure|igure)" if asset_type == "figure" else r"(?:ble|able)"
+    return bool(re.search(rf"(?:^|\s){stem}\s+{re.escape(number.group(1))}\b", prefix, re.I))
 
 
 def _nearest_images(blocks: list[SourceBlock], index: int, asset_type: str) -> list[SourceBlock]:
@@ -625,10 +700,16 @@ def bind_assets(blocks: list[SourceBlock], pmcid: str) -> list[Asset]:
         caption_text = block.text[match.start() :].strip()
         raw_label = re.sub(r"\s+", " ", match.group("label")).strip()
         label_number = re.search(r"\b(S?\d+[A-Za-z]?|[IVXLC]+)\b", raw_label, re.I)
-        if asset_type == "figure" and label_number:
-            label = f"Figure {label_number.group(1)}"
+        if label_number:
+            canonical_prefix = "Figure" if asset_type == "figure" else "Table"
+            label = f"{canonical_prefix} {label_number.group(1)}"
+            source_prefix = (
+                r"(?:Figure|Fig\.|igure|gure|ure|re|e)"
+                if asset_type == "figure"
+                else r"(?:Table|able|ble)"
+            )
             caption_text = re.sub(
-                r"^\s*(?:Figure|Fig\.|igure|gure|ure)\s+" + re.escape(label_number.group(1)),
+                rf"^\s*{source_prefix}\s+" + re.escape(label_number.group(1)),
                 label,
                 caption_text,
                 count=1,
@@ -649,8 +730,9 @@ def bind_assets(blocks: list[SourceBlock], pmcid: str) -> list[Asset]:
             low_order = min([block.order] + [image.order for image in images])
             high_order = max([block.order] + [image.order for image in images])
             for possible_panel in blocks:
-                if low_order <= possible_panel.order <= high_order and re.fullmatch(
-                    r"[A-Ha-h]", possible_panel.text.strip()
+                if (
+                    low_order <= possible_panel.order <= high_order
+                    and _is_figure_panel_artifact(possible_panel.text)
                 ):
                     possible_panel.asset_id = asset_id
         before_block, after_block = _find_reference_context(blocks, index, asset_type, label)
@@ -746,14 +828,28 @@ def parse_document(
     metadata = metadata or {}
     raw = markdown_path.read_text(encoding="utf-8", errors="replace")
     blocks = parse_markdown_blocks(raw)
-    h1_candidates = [block.text for block in blocks if block.kind == "heading" and block.heading_level == 1]
+    h1_candidates = [
+        block.text
+        for block in blocks
+        if block.kind == "heading" and block.heading_level == 1
+    ]
     markdown_title = next((text for text in h1_candidates if _valid_title(text)), "")
+    opening_h2: list[str] = []
+    for block in blocks:
+        if block.kind in {"paragraph", "list"} and len(block.text.split()) >= 40:
+            break
+        if block.kind == "heading" and block.heading_level == 2:
+            opening_h2.append(block.text)
+    markdown_h2_title = next((text for text in opening_h2 if _valid_title(text)), "")
     metadata_title = str(metadata.get("title") or metadata.get("metadata", {}).get("title") or "").strip()
     parse_warnings: list[str] = []
     if metadata_title and not _valid_title(metadata_title):
         parse_warnings.append("metadata_title_anomaly")
     if markdown_title:
         paper_title, title_source = markdown_title, "markdown_h1"
+    elif markdown_h2_title:
+        paper_title, title_source = markdown_h2_title, "markdown_h2_fallback"
+        parse_warnings.append("title_recovered_from_markdown_h2")
     elif _valid_title(metadata_title):
         paper_title, title_source = metadata_title, "metadata_jsonl"
     else:

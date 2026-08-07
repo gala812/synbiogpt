@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 import hashlib
 import re
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .models import Asset, ChunkingConfig, ParsedDocument, SourceBlock, TextUnit
 from .tokenization import TokenCounter
@@ -16,6 +16,8 @@ ABBREVIATIONS = {
     "fig.", "figs.", "i.e.", "inc.", "no.", "nos.", "prof.", "ref.", "refs.",
     "sp.", "spp.", "st.", "table.", "vs.",
 }
+MAX_EMBEDDING_SUBSECTION_CHARS = 160
+TokenMeasure = Callable[[str], int]
 
 
 def word_count(text: str) -> int:
@@ -25,6 +27,38 @@ def word_count(text: str) -> int:
 def _slug(text: str, fallback: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
     return (slug[:48] or fallback).strip("_")
+
+
+def _embedding_section(section: str, subsection: str) -> str:
+    if not subsection:
+        return section
+    compact = re.sub(r"\s+", " ", subsection).strip()
+    if len(compact) > MAX_EMBEDDING_SUBSECTION_CHARS:
+        compact = compact[:MAX_EMBEDDING_SUBSECTION_CHARS].rsplit(" ", 1)[0] + "…"
+    return f"{section} > {compact}"
+
+
+def build_embedding_text(
+    paper_title: str,
+    section: str,
+    subsection: str,
+    text: str,
+) -> str:
+    return (
+        f"Title: {paper_title}\n"
+        f"Section: {_embedding_section(section, subsection)}\n"
+        f"Text: {text}"
+    )
+
+
+def _token_measure(
+    unit: TextUnit,
+    paper_title: str,
+    token_counter: TokenCounter,
+) -> TokenMeasure:
+    return lambda text: token_counter.count(
+        build_embedding_text(paper_title, unit.section, unit.subsection, text)
+    )
 
 
 def _sentence_spans(text: str) -> list[tuple[int, int, str]]:
@@ -59,7 +93,7 @@ def _sentence_spans(text: str) -> list[tuple[int, int, str]]:
 
 def _force_split_sentence(
     text: str,
-    token_counter: TokenCounter,
+    count_tokens: TokenMeasure,
     config: ChunkingConfig,
 ) -> list[tuple[int, int, str, list[str]]]:
     """Last-resort split at clause/word boundaries when one sentence exceeds BERT."""
@@ -72,7 +106,7 @@ def _force_split_sentence(
     if start < len(text):
         clause_spans.append((start, len(text)))
     if len(clause_spans) > 1 and all(
-        token_counter.count(text[a:b]) <= config.hard_max_tokens
+        count_tokens(text[a:b]) <= config.hard_max_tokens
         and word_count(text[a:b]) <= config.hard_max_words
         for a, b in clause_spans
     ):
@@ -91,7 +125,7 @@ def _force_split_sentence(
             start_char = words[cursor].start()
             end_char = words[end_index - 1].end()
             candidate = text[start_char:end_char]
-            if token_counter.count(candidate) <= config.hard_max_tokens:
+            if count_tokens(candidate) <= config.hard_max_tokens:
                 break
             end_index -= 1
         if end_index <= cursor:
@@ -99,14 +133,14 @@ def _force_split_sentence(
         start_char = words[cursor].start()
         end_char = words[end_index - 1].end()
         candidate = text[start_char:end_char]
-        if end_index == cursor + 1 and token_counter.count(candidate) > config.hard_max_tokens:
+        if end_index == cursor + 1 and count_tokens(candidate) > config.hard_max_tokens:
             char_cursor = start_char
             while char_cursor < end_char:
                 low, high = char_cursor + 1, end_char
                 best = low
                 while low <= high:
                     middle = (low + high) // 2
-                    if token_counter.count(text[char_cursor:middle]) <= config.hard_max_tokens:
+                    if count_tokens(text[char_cursor:middle]) <= config.hard_max_tokens:
                         best = middle
                         low = middle + 1
                     else:
@@ -139,16 +173,16 @@ def _force_split_sentence(
 
 def _split_long_unit(
     unit: TextUnit,
-    token_counter: TokenCounter,
+    count_tokens: TokenMeasure,
     config: ChunkingConfig,
 ) -> list[TextUnit]:
     sentence_parts: list[tuple[int, int, str, list[str]]] = []
     for start, end, sentence in _sentence_spans(unit.text):
         if (
             word_count(sentence) > config.hard_max_words
-            or token_counter.count(sentence) > config.hard_max_tokens
+            or count_tokens(sentence) > config.hard_max_tokens
         ):
-            for a, b, text, warnings in _force_split_sentence(sentence, token_counter, config):
+            for a, b, text, warnings in _force_split_sentence(sentence, count_tokens, config):
                 sentence_parts.append((start + a, start + b, text, warnings))
         else:
             sentence_parts.append((start, end, sentence, []))
@@ -160,7 +194,7 @@ def _split_long_unit(
         proposed = " ".join([item[2] for item in current] + [part[2]])
         if current and (
             word_count(proposed) > base_limit
-            or token_counter.count(proposed) > config.hard_max_tokens
+            or count_tokens(proposed) > config.hard_max_tokens
         ):
             base_groups.append(current)
             current = [part]
@@ -177,7 +211,7 @@ def _split_long_unit(
         if (
             word_count(tail_text) < config.min_chunk_words
             and word_count(combined) <= config.hard_max_words
-            and token_counter.count(combined) <= config.hard_max_tokens
+            and count_tokens(combined) <= config.hard_max_tokens
         ):
             base_groups[-2].extend(base_groups.pop())
 
@@ -200,7 +234,7 @@ def _split_long_unit(
         candidate_text = " ".join(item[2] for item in candidate)
         while overlap and (
             word_count(candidate_text) > config.target_max_words
-            or token_counter.count(candidate_text) > config.hard_max_tokens
+            or count_tokens(candidate_text) > config.hard_max_tokens
         ):
             overlap.pop(0)
             candidate = overlap + group
@@ -330,20 +364,28 @@ def _combine_units(units: list[TextUnit]) -> TextUnit:
     )
 
 
-def _within_hard_limits(text: str, token_counter: TokenCounter, config: ChunkingConfig) -> bool:
+def _within_hard_limits(
+    text: str, count_tokens: TokenMeasure, config: ChunkingConfig
+) -> bool:
     return (
         word_count(text) <= config.hard_max_words
-        and token_counter.count(text) <= config.hard_max_tokens
+        and count_tokens(text) <= config.hard_max_tokens
     )
 
 
 def chunk_units(
-    units: list[TextUnit], token_counter: TokenCounter, config: ChunkingConfig
+    units: list[TextUnit],
+    token_counter: TokenCounter,
+    config: ChunkingConfig,
+    paper_title: str,
 ) -> list[TextUnit]:
     expanded: list[TextUnit] = []
     for unit in units:
-        if not _within_hard_limits(unit.text, token_counter, config):
-            expanded.extend(_split_long_unit(unit, token_counter, config))
+        count_tokens = _token_measure(unit, paper_title, token_counter)
+        if count_tokens("") > config.hard_max_tokens:
+            raise ValueError(f"Embedding prefix exceeds token limit in {unit.section!r}")
+        if not _within_hard_limits(unit.text, count_tokens, config):
+            expanded.extend(_split_long_unit(unit, count_tokens, config))
         else:
             expanded.append(unit)
 
@@ -377,9 +419,10 @@ def chunk_units(
         proposed_text = f"{current_text}\n\n{unit.text}"
         current_words = word_count(current_text)
         proposed_words = word_count(proposed_text)
+        count_tokens = _token_measure(current[0], paper_title, token_counter)
         should_add = (
             proposed_words <= config.soft_max_words
-            and token_counter.count(proposed_text) <= config.hard_max_tokens
+            and count_tokens(proposed_text) <= config.hard_max_tokens
             and (current_words < config.target_min_words or proposed_words <= config.target_max_words)
         )
         if should_add:
@@ -401,9 +444,10 @@ def chunk_units(
         mergeable_type = current_unit.kind not in {"figure_caption", "table_caption"}
         if same_path and mergeable_type and word_count(current_unit.text) < config.min_chunk_words:
             combined = _combine_units([previous, current_unit])
+            count_tokens = _token_measure(current_unit, paper_title, token_counter)
             if (
                 word_count(combined.text) <= config.soft_max_words
-                and token_counter.count(combined.text) <= config.hard_max_tokens
+                and count_tokens(combined.text) <= config.hard_max_tokens
                 and previous.kind not in {"figure_caption", "table_caption"}
             ):
                 output[index - 1] = combined
@@ -496,7 +540,7 @@ def create_chunks(
     for asset in document.assets:
         units.extend(_asset_units(asset))
     units.sort(key=lambda unit: unit.order)
-    child_units = chunk_units(units, token_counter, config)
+    child_units = chunk_units(units, token_counter, config, document.paper_title)
 
     chunks: list[dict[str, Any]] = []
     path_counters: defaultdict[tuple[str, str], int] = defaultdict(int)
@@ -512,6 +556,9 @@ def create_chunks(
             chunk_id = f"{document.pmcid}_{section_slug}_{subsection_slug}_{path_hash}_{path_counters[path]:04d}"
         used_chunk_ids.add(chunk_id)
         section_path = [unit.section] + ([unit.subsection] if unit.subsection else [])
+        embedding_text = build_embedding_text(
+            document.paper_title, unit.section, unit.subsection, unit.text
+        )
         chunks.append(
             {
                 "chunk_id": chunk_id,
@@ -526,7 +573,8 @@ def create_chunks(
                 "parent_chunk_id": "",
                 "text": unit.text,
                 "word_count": word_count(unit.text),
-                "token_count": token_counter.count(unit.text),
+                "text_token_count": token_counter.count(unit.text),
+                "token_count": token_counter.count(embedding_text),
                 "tokenizer_name": token_counter.name,
                 "char_start": unit.char_start,
                 "char_end": unit.char_end,
