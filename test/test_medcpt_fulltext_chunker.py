@@ -313,6 +313,35 @@ able 1. Engineered strains used in fermentation.
     assert document.assets[1].image_paths == ["images/table1.jpg"]
 
 
+def test_recovers_unstructured_body_and_removes_exact_duplicate_chunks(
+    tmp_path: Path,
+) -> None:
+    repeated = _words("repeated", 210)
+    markdown = f"""# Narrative Paper Without Standard Section Headings
+
+Author Name
+
+{_words('opening', 90)}
+
+{repeated}
+
+{repeated}
+
+## References
+
+Reference text that must be excluded.
+"""
+    path = _write_paper(tmp_path, "PMC0000009", markdown, ["unused.jpg"])
+    document = parse_document(path, "PMC0000009")
+    chunks, _ = create_chunks(document, RegexTokenCounter(), ChunkingConfig())
+
+    assert "body_recovered_without_standard_sections" in document.parse_warnings
+    assert chunks
+    assert {chunk["section"] for chunk in chunks} == {"Unassigned"}
+    assert document.excluded_counts["duplicate_chunk"] == 1
+    assert sum(chunk["text"].count("repeated0") for chunk in chunks) == 1
+
+
 def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "output"
@@ -350,8 +379,10 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
         workers=1,
         tokenizer_name="generic:test_v1",
         inventory_db=inventory_db,
+        documents_per_shard=1,
     )
-    chunks_before = (output_root / "chunks.jsonl").read_bytes()
+    chunk_parts = sorted((output_root / "chunks").glob("part-*.jsonl"))
+    chunks_before = [path.read_bytes() for path in chunk_parts]
     stats2 = run_pipeline(
         input_dir=input_root,
         output_dir=output_root,
@@ -359,8 +390,9 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
         workers=1,
         tokenizer_name="generic:test_v1",
         inventory_db=inventory_db,
+        documents_per_shard=1,
     )
-    chunks_after = (output_root / "chunks.jsonl").read_bytes()
+    chunks_after = [path.read_bytes() for path in chunk_parts]
 
     assert stats1["successful_documents"] == 2
     assert stats1["failed_documents"] == 0
@@ -372,16 +404,21 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
     assert stats2["worker_start_method"] == "none"
     assert chunks_before == chunks_after
     expected = {
-        "chunks.jsonl",
-        "parents.jsonl",
-        "figures_tables.jsonl",
+        "chunks",
+        "parents",
+        "figures_tables",
         "documents.jsonl",
         "errors.jsonl",
         "statistics.json",
+        "manifest.json",
         "inspection_samples.jsonl",
     }
     assert expected.issubset({path.name for path in output_root.iterdir()})
-    rows = [json.loads(line) for line in (output_root / "chunks.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(chunk_parts) == 2
+    rows = []
+    for path in chunk_parts:
+        with path.open("rt", encoding="utf-8") as handle:
+            rows.extend(json.loads(line) for line in handle)
     assert rows == sorted(rows, key=lambda row: (row["pmcid"], row["chunk_index"]))
     required_chunk_fields = {
         "chunk_id", "doc_id", "pmcid", "paper_title", "section", "subsection",
@@ -397,3 +434,37 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
     assert stats["chunks_above_448_tokens"] == 0
     assert "missing_table_text_count" in stats
     assert "excluded_references_blocks" in stats
+    assert stats["documents_per_shard"] == 1
+    assert stats["shard_count"] == 2
+    manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["output_layout"] == "document_count_jsonl_shards_v1"
+    assert [shard["selected_document_count"] for shard in manifest["shards"]] == [1, 1]
+    assert all(shard["failed_document_count"] == 0 for shard in manifest["shards"])
+
+
+def test_zero_chunk_document_is_reported_as_failure(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    _write_paper(
+        input_root,
+        "PMC0000030",
+        "# Metadata Only Record\n\nAuthor Name\n\n## References\n\nOne reference.\n",
+        ["unused.jpg"],
+    )
+
+    stats = run_pipeline(
+        input_dir=input_root,
+        output_dir=output_root,
+        limit=1,
+        workers=1,
+        tokenizer_name="generic:test_v1",
+    )
+
+    assert stats["successful_documents"] == 0
+    assert stats["failed_documents"] == 1
+    assert (output_root / "documents.jsonl").read_text(encoding="utf-8") == ""
+    errors = [
+        json.loads(line)
+        for line in (output_root / "errors.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert errors[0]["error_message"] == "No searchable body chunks were produced"

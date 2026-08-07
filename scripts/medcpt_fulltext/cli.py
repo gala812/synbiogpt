@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rescan the input tree and atomically rebuild the reusable inventory.",
     )
     parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument(
+        "--documents-per-shard",
+        type=int,
+        default=500,
+        help="Number of selected papers assigned to each deterministic JSONL shard.",
+    )
     parser.add_argument("--workers", type=int, default=max(1, min(8, (os.cpu_count() or 2) - 1)))
     parser.add_argument("--tokenizer", default=MEDCPT_TOKENIZER)
     parser.add_argument(
@@ -66,6 +72,7 @@ def main() -> int:
         inventory_db=inventory_db,
         refresh_inventory=args.refresh_inventory,
         inspection_seed=args.inspection_seed,
+        documents_per_shard=args.documents_per_shard,
         config=ChunkingConfig(),
     )
     print(json.dumps(stats, ensure_ascii=False, indent=2, sort_keys=True))

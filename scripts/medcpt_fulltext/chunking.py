@@ -531,6 +531,30 @@ def _make_parents(
     return parents
 
 
+def _deduplicate_text_units(units: list[TextUnit]) -> tuple[list[TextUnit], int]:
+    """Remove exact repeated prose while preserving every asset-bearing unit."""
+
+    seen: set[str] = set()
+    unique: list[TextUnit] = []
+    removed = 0
+    for unit in units:
+        normalized = re.sub(r"\s+", " ", unit.text).strip().casefold()
+        eligible = (
+            len(normalized) >= 80
+            and not unit.image_paths
+            and not unit.figure_ids
+            and not unit.table_ids
+            and unit.kind not in {"figure_caption", "table_caption"}
+        )
+        if eligible and normalized in seen:
+            removed += 1
+            continue
+        if eligible:
+            seen.add(normalized)
+        unique.append(unit)
+    return unique, removed
+
+
 def create_chunks(
     document: ParsedDocument,
     token_counter: TokenCounter,
@@ -541,6 +565,12 @@ def create_chunks(
         units.extend(_asset_units(asset))
     units.sort(key=lambda unit: unit.order)
     child_units = chunk_units(units, token_counter, config, document.paper_title)
+    child_units, duplicate_count = _deduplicate_text_units(child_units)
+    if duplicate_count:
+        document.excluded_counts["duplicate_chunk"] = duplicate_count
+        document.parse_warnings = sorted(
+            set(document.parse_warnings + ["exact_duplicate_chunks_removed"])
+        )
 
     chunks: list[dict[str, Any]] = []
     path_counters: defaultdict[tuple[str, str], int] = defaultdict(int)

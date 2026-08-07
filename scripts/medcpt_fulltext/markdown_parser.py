@@ -35,6 +35,7 @@ AD_PHRASES = (
 
 INLINE_NON_BODY_RE = re.compile(
     r"^\s*(?:"
+    r"Citation|Copyright|Received|Revised|Accepted|Published|"
     r"Author Contributions?|Authors['’]? Contributions?|"
     r"Acknowledgements?|Acknowledgments?|"
     r"Funding(?: Information)?|"
@@ -566,9 +567,76 @@ def _assign_structure_and_exclusions(
             continue
         seen_text[normalized] += 1
 
+    if not any(
+        block.kind in {"paragraph", "list", "equation"}
+        and not block.excluded_reason
+        for block in blocks
+    ):
+        _recover_unstructured_body(blocks, paper_title, section_tree, excluded, warnings)
+
     for block in blocks:
         warnings.extend(block.warnings)
     return dict(section_tree), unknown, excluded, warnings
+
+
+def _recover_unstructured_body(
+    blocks: list[SourceBlock],
+    paper_title: str,
+    section_tree: dict[str, list[str]],
+    excluded: Counter[str],
+    warnings: list[str],
+) -> None:
+    """Recover prose from papers that contain no standard body headings."""
+
+    normalized_title = normalize_heading_key(paper_title)
+    title_order = max(
+        (
+            block.order
+            for block in blocks
+            if block.kind == "heading"
+            and normalize_heading_key(block.text) == normalized_title
+        ),
+        default=-1,
+    )
+    start_order: int | None = None
+    for block in blocks:
+        if block.order <= title_order or block.section == "References":
+            continue
+        if block.excluded_reason != "front_matter" or block.kind not in {"paragraph", "list"}:
+            continue
+        words = len(re.findall(r"\S+", block.text))
+        sentence_ends = len(re.findall(r"[.!?](?:[\"')\]]?)(?:\s|$)", block.text))
+        if words >= 80 or (words >= 60 and sentence_ends >= 2):
+            start_order = block.order
+            break
+    if start_order is None:
+        return
+
+    subsection = ""
+    recovered = 0
+    section_tree.setdefault("Unassigned", [])
+    for block in blocks:
+        if block.order < start_order or block.section == "References":
+            continue
+        if block.kind == "heading":
+            if block.excluded_reason:
+                continue
+            subsection = block.text
+            block.section, block.subsection = "Unassigned", subsection
+            if subsection not in section_tree["Unassigned"]:
+                section_tree["Unassigned"].append(subsection)
+            continue
+        if block.excluded_reason != "front_matter":
+            continue
+        block.excluded_reason = None
+        block.section, block.subsection = "Unassigned", subsection
+        excluded["front_matter"] -= 1
+        recovered += 1
+
+    if recovered:
+        if excluded["front_matter"] <= 0:
+            excluded.pop("front_matter", None)
+        warnings.append("body_recovered_without_standard_sections")
 
 
 def _caption_match(block: SourceBlock) -> tuple[str, re.Match[str]] | None:

@@ -25,7 +25,7 @@ from .tokenization import MEDCPT_TOKENIZER, TokenCounter, resolve_tokenizer
 
 
 SCHEMA_VERSION = "medcpt_markdown_chunk_v1"
-PIPELINE_REVISION = "pilot_rules_r5"
+PIPELINE_REVISION = "production_rules_v1"
 INVENTORY_SCHEMA_VERSION = 1
 PMCID_RE = re.compile(r"^PMC\d+$", re.I)
 JSON_ID_RE = re.compile(rb'"(?:id|doc_id|pmcid)"\s*:\s*"(PMC\d+)"', re.I)
@@ -96,6 +96,54 @@ def _atomic_write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         except OSError:
             pass
         raise
+
+
+class _AtomicJsonlWriter:
+    """Stream JSONL to a temporary file and publish it atomically."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".partial", dir=path.parent
+        )
+        self.path = path
+        self.temp_path = Path(temp_name)
+        self.raw = os.fdopen(fd, "wb")
+        self.content_sha256 = hashlib.sha256()
+        self.row_count = 0
+        self.finished = False
+
+    def write(self, row: dict[str, Any]) -> None:
+        data = _json_bytes(row) + b"\n"
+        self.raw.write(data)
+        self.content_sha256.update(data)
+        self.row_count += 1
+
+    def finish(self) -> dict[str, Any]:
+        if self.finished:
+            raise RuntimeError(f"Writer already finished: {self.path}")
+        self.raw.flush()
+        os.fsync(self.raw.fileno())
+        self.raw.close()
+        os.replace(self.temp_path, self.path)
+        self.finished = True
+        return {
+            "row_count": self.row_count,
+            "content_sha256": self.content_sha256.hexdigest(),
+            "size_bytes": self.path.stat().st_size,
+        }
+
+    def abort(self) -> None:
+        if self.finished:
+            return
+        try:
+            if not self.raw.closed:
+                self.raw.close()
+        finally:
+            try:
+                self.temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _has_any_image(markdown_path: Path) -> bool:
@@ -495,6 +543,8 @@ def _process_one(payload: dict[str, Any]) -> dict[str, Any]:
         assert _WORKER_TOKENIZER is not None and _WORKER_CONFIG is not None
         document = parse_document(candidate.markdown_path, candidate.pmcid, payload["metadata"])
         chunks, parents = create_chunks(document, _WORKER_TOKENIZER, _WORKER_CONFIG)
+        if not chunks:
+            raise ValueError("No searchable body chunks were produced")
         for chunk in chunks:
             if chunk["word_count"] > _WORKER_CONFIG.hard_max_words:
                 raise ValueError(f"chunk {chunk['chunk_id']} exceeds hard word limit")
@@ -563,6 +613,12 @@ def _write_final_outputs(
     processing_task_count: int,
     effective_workers: int,
     worker_start_method: str,
+    documents_per_shard: int,
+    input_dir: Path,
+    metadata_jsonl: Path | None,
+    require_images: bool,
+    config_hash: str,
+    config_values: dict[str, int],
 ) -> dict[str, Any]:
     merge_started = time.perf_counter()
     chunk_words: list[int] = []
@@ -584,7 +640,7 @@ def _write_final_outputs(
     table_block_count = 0
     chunks_above_448_tokens = 0
 
-    committed_ids = []
+    committed_ids: list[str] = []
     for candidate in candidates:
         bundle_path, marker_path = _spool_paths(output_dir, candidate.pmcid)
         if marker_path.is_file() and bundle_path.is_file():
@@ -593,33 +649,76 @@ def _write_final_outputs(
     rng = random.Random(inspection_seed)
     sampled_ids = set(rng.sample(committed_ids, sample_count)) if sample_count else set()
 
-    output_names = {
-        "chunks": "chunks.jsonl",
-        "parents": "parents.jsonl",
-        "assets": "figures_tables.jsonl",
-        "documents": "documents.jsonl",
-        "errors": "errors.jsonl",
-        "inspection": "inspection_samples.jsonl",
+    single_writers = {
+        "documents": _AtomicJsonlWriter(output_dir / "documents.jsonl"),
+        "errors": _AtomicJsonlWriter(output_dir / "errors.jsonl"),
+        "inspection": _AtomicJsonlWriter(output_dir / "inspection_samples.jsonl"),
     }
-    temp_paths: dict[str, str] = {}
-    handles: dict[str, Any] = {}
+    active_shard_writers: dict[str, _AtomicJsonlWriter] = {}
+    shard_records: list[dict[str, Any]] = []
+    successful_ids: set[str] = set()
+    failure_by_id = {row["pmcid"]: row for row in failed}
+    current_shard = -1
 
-    def write_row(name: str, row: dict[str, Any]) -> None:
-        handles[name].write(_json_bytes(row))
-        handles[name].write(b"\n")
+    def add_failure(row: dict[str, Any]) -> None:
+        failure_by_id.setdefault(row["pmcid"], row)
 
-    merge_failures = list(failed)
+    def open_shard(shard_index: int) -> None:
+        nonlocal active_shard_writers, current_shard
+        part_name = f"part-{shard_index:05d}.jsonl"
+        active_shard_writers = {
+            "chunks": _AtomicJsonlWriter(output_dir / "chunks" / part_name),
+            "parents": _AtomicJsonlWriter(output_dir / "parents" / part_name),
+            "assets": _AtomicJsonlWriter(output_dir / "figures_tables" / part_name),
+        }
+        current_shard = shard_index
+
+    def finish_shard() -> None:
+        nonlocal active_shard_writers
+        if not active_shard_writers:
+            return
+        start = current_shard * documents_per_shard
+        selected = candidates[start : start + documents_per_shard]
+        files: dict[str, dict[str, Any]] = {}
+        directories = {
+            "chunks": "chunks",
+            "parents": "parents",
+            "assets": "figures_tables",
+        }
+        for name, writer in active_shard_writers.items():
+            details = writer.finish()
+            details["path"] = writer.path.relative_to(output_dir).as_posix()
+            files[directories[name]] = details
+        shard_records.append(
+            {
+                "shard_index": current_shard,
+                "part_name": f"part-{current_shard:05d}.jsonl",
+                "pmcid_start": selected[0].pmcid,
+                "pmcid_end": selected[-1].pmcid,
+                "selected_document_count": len(selected),
+                "files": files,
+            }
+        )
+        active_shard_writers = {}
+
     try:
-        for name, filename in output_names.items():
-            fd, temp_name = tempfile.mkstemp(
-                prefix=f".{filename}.", suffix=".partial", dir=output_dir
-            )
-            temp_paths[name] = temp_name
-            handles[name] = os.fdopen(fd, "wb")
-
-        for candidate in candidates:
+        for candidate_index, candidate in enumerate(candidates):
+            shard_index = candidate_index // documents_per_shard
+            if shard_index != current_shard:
+                finish_shard()
+                open_shard(shard_index)
             bundle_path, marker_path = _spool_paths(output_dir, candidate.pmcid)
             if not marker_path.is_file() or not bundle_path.is_file():
+                if candidate.pmcid not in failure_by_id:
+                    add_failure(
+                        {
+                            "pmcid": candidate.pmcid,
+                            "status": "failed",
+                            "error_type": "MissingCommittedBundle",
+                            "error_message": "No committed spool bundle is available",
+                            "source_markdown": str(candidate.markdown_path),
+                        }
+                    )
                 continue
             try:
                 bundle = _read_bundle(bundle_path)
@@ -630,7 +729,7 @@ def _write_final_outputs(
                     bundle["assets"], key=lambda row: (row["char_start"], row.get("label") or "")
                 )
             except (OSError, EOFError, KeyError, TypeError, json.JSONDecodeError) as exc:
-                merge_failures.append(
+                add_failure(
                     {
                         "pmcid": candidate.pmcid,
                         "status": "failed",
@@ -641,9 +740,21 @@ def _write_final_outputs(
                 )
                 continue
 
-            write_row("documents", document)
+            if not chunks:
+                add_failure(
+                    {
+                        "pmcid": candidate.pmcid,
+                        "status": "failed",
+                        "error_type": "ZeroBodyChunks",
+                        "error_message": "Committed bundle contains no searchable body chunks",
+                        "source_markdown": str(candidate.markdown_path),
+                    }
+                )
+                continue
+
+            single_writers["documents"].write(document)
             for chunk in chunks:
-                write_row("chunks", chunk)
+                active_shard_writers["chunks"].write(chunk)
                 word_count = int(chunk["word_count"])
                 chunk_words.append(word_count)
                 section = chunk["section"]
@@ -653,15 +764,16 @@ def _write_final_outputs(
                 tokenizer_names.add(chunk["tokenizer_name"])
                 chunks_above_448_tokens += int(chunk["token_count"] > 448)
             for parent in parents:
-                write_row("parents", parent)
+                active_shard_writers["parents"].write(parent)
             for asset in assets:
-                write_row("assets", asset)
+                active_shard_writers["assets"].write(asset)
                 missing_table_text_count += bool(asset["table_text_missing"])
                 image_asset_count += bool(asset["image_paths"])
                 figure_block_count += asset["asset_type"] == "figure"
                 table_block_count += asset["asset_type"] == "table"
 
             successful_documents += 1
+            successful_ids.add(candidate.pmcid)
             chunks_per_document.append(int(document["chunk_count"]))
             unknown_heading_count += len(document["unknown_headings"])
             title_anomaly_count += bool(document["title_anomaly"])
@@ -675,8 +787,7 @@ def _write_final_outputs(
                 excluded_totals[key] = excluded_totals.get(key, 0) + value
 
             if candidate.pmcid in sampled_ids:
-                write_row(
-                    "inspection",
+                single_writers["inspection"].write(
                     {
                         "pmcid": document["pmcid"],
                         "paper_title": document["paper_title"],
@@ -699,24 +810,38 @@ def _write_final_outputs(
                     },
                 )
 
-        for row in sorted(merge_failures, key=lambda item: item["pmcid"]):
-            write_row("errors", row)
-        for handle in handles.values():
-            handle.flush()
-            os.fsync(handle.fileno())
-            handle.close()
-        for name, filename in output_names.items():
-            os.replace(temp_paths[name], output_dir / filename)
+        finish_shard()
+        for row in sorted(failure_by_id.values(), key=lambda item: item["pmcid"]):
+            single_writers["errors"].write(row)
+        global_files = {
+            name: writer.finish() for name, writer in single_writers.items()
+        }
     except Exception:
-        for handle in handles.values():
-            if not handle.closed:
-                handle.close()
-        for temp_name in temp_paths.values():
-            try:
-                os.unlink(temp_name)
-            except OSError:
-                pass
+        for writer in [*single_writers.values(), *active_shard_writers.values()]:
+            writer.abort()
         raise
+
+    for shard in shard_records:
+        start = shard["shard_index"] * documents_per_shard
+        selected = candidates[start : start + documents_per_shard]
+        success_count = sum(candidate.pmcid in successful_ids for candidate in selected)
+        shard["successful_document_count"] = success_count
+        shard["failed_document_count"] = len(selected) - success_count
+
+    valid_shards = {
+        output_dir / details["path"]
+        for shard in shard_records
+        for details in shard["files"].values()
+    }
+    for directory in ("chunks", "parents", "figures_tables"):
+        for pattern in ("part-*.jsonl", "part-*.jsonl.gz"):
+            for path in (output_dir / directory).glob(pattern):
+                if path not in valid_shards:
+                    path.unlink()
+    for legacy_name in ("chunks.jsonl", "parents.jsonl", "figures_tables.jsonl"):
+        legacy_path = output_dir / legacy_name
+        if legacy_path.is_file():
+            legacy_path.unlink()
 
     merge_seconds = time.perf_counter() - merge_started
     elapsed_seconds = time.perf_counter() - end_to_end_started
@@ -724,7 +849,7 @@ def _write_final_outputs(
         "schema_version": SCHEMA_VERSION,
         "pipeline_revision": PIPELINE_REVISION,
         "successful_documents": successful_documents,
-        "failed_documents": len(merge_failures),
+        "failed_documents": len(failure_by_id),
         "skipped_documents": skipped_count,
         "selected_documents": selected_count,
         "newly_processed_documents": newly_processed_count,
@@ -741,6 +866,8 @@ def _write_final_outputs(
         "merge_seconds": round(merge_seconds, 6),
         "effective_workers": effective_workers,
         "worker_start_method": worker_start_method,
+        "documents_per_shard": documents_per_shard,
+        "shard_count": len(shard_records),
         "total_chunks": len(chunk_words),
         "chunks_per_document_mean": round(statistics.mean(chunks_per_document), 4) if chunks_per_document else 0.0,
         "chunks_per_document_median": statistics.median(chunks_per_document) if chunks_per_document else 0.0,
@@ -777,6 +904,38 @@ def _write_final_outputs(
         json.dumps(statistics_row, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8") + b"\n",
     )
 
+    manifest = {
+        "schema_version": "medcpt_chunk_manifest_v1",
+        "pipeline_revision": PIPELINE_REVISION,
+        "output_layout": "document_count_jsonl_shards_v1",
+        "documents_per_shard": documents_per_shard,
+        "selected_documents": selected_count,
+        "successful_documents": successful_documents,
+        "failed_documents": len(failure_by_id),
+        "input": {
+            "input_dir": str(input_dir),
+            "metadata_jsonl": str(metadata_jsonl) if metadata_jsonl else None,
+            "require_images": require_images,
+        },
+        "tokenizer_name": resolved_tokenizer_name,
+        "config_hash": config_hash,
+        "chunking_config": config_values,
+        "global_files": {
+            "documents": {"path": "documents.jsonl", **global_files["documents"]},
+            "errors": {"path": "errors.jsonl", **global_files["errors"]},
+            "inspection_samples": {
+                "path": "inspection_samples.jsonl",
+                **global_files["inspection"],
+            },
+            "statistics": {"path": "statistics.json"},
+        },
+        "shards": shard_records,
+    }
+    _atomic_write_bytes(
+        output_dir / "manifest.json",
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8") + b"\n",
+    )
+
     return statistics_row
 
 
@@ -795,10 +954,17 @@ def run_pipeline(
     inventory_db: Path | None = None,
     refresh_inventory: bool = False,
     inspection_seed: int = 20260806,
+    documents_per_shard: int = 500,
     config: ChunkingConfig | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    input_dir = input_dir.resolve()
+    output_dir = output_dir.resolve()
+    metadata_jsonl = metadata_jsonl.resolve() if metadata_jsonl else None
+    inventory_db = inventory_db.resolve() if inventory_db else None
     config = config or ChunkingConfig()
+    if documents_per_shard <= 0:
+        raise ValueError("documents_per_shard must be greater than zero")
     if not input_dir.is_dir():
         raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -942,5 +1108,11 @@ def run_pipeline(
         processing_task_count=len(tasks),
         effective_workers=effective_workers,
         worker_start_method=worker_start_method,
+        documents_per_shard=documents_per_shard,
+        input_dir=input_dir,
+        metadata_jsonl=metadata_jsonl,
+        require_images=require_images,
+        config_hash=config_hash,
+        config_values=config_payload,
     )
     return stats

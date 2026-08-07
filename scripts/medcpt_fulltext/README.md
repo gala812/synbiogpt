@@ -1,89 +1,77 @@
-# MinerU Markdown 全文切块（500篇试运行）
+# MinerU Markdown 全文切块
 
-该工具只生成全文子块、父块和图表记录，不生成 SPECTER2 论文级索引，也不会修改原始 Markdown 或图片。
+该工具为 MedCPT/BM25 生成全文子块、父块和图表记录，不生成 SPECTER2 论文级索引，也不会修改原始 Markdown 或图片。
 
-## 输入与选择规则
+## 输入与处理规则
 
-- 递归扫描 `--input-dir` 下文件名为 `PMC*.md` 的文件，因此兼容真实目录结构：
-  `output/{任务UUID}/{PMCID}/auto/{PMCID}.md`。
-- 默认只选择同级 `images/` 中至少有一个文件的论文；使用 `--include-without-images` 可关闭该限制。
-- 按 PMCID 文件名排序并取前 `--limit` 个唯一 PMCID，默认 500。
-- 同一 PMCID 有多次 MinerU 输出时，依次比较有效图片引用数、图片引用数、标题数和正文长度，确定性选择质量最高的一份。
-- `--metadata-jsonl` 可指向单个 JSONL 或包含多个 JSONL 的目录。程序先确定500个PMCID，再流式查找这些PMCID，避免将全文元数据全部载入内存。
-- 首次运行会建立可复用的 `article_inventory.sqlite3`。后续试跑、断点续跑和2万篇生产运行直接查询清单，不再递归扫描全部NFS目录；只有输入目录新增或删除论文后才使用 `--refresh-inventory`。
+- 递归扫描 `--input-dir` 下文件名为 `PMC*.md` 的论文。
+- 默认只选择同级 `images/` 非空的论文；`--include-without-images` 可关闭限制。
+- 按 PMCID 排序并处理前 `--limit` 篇；`--limit 0` 表示全部。
+- 同一 PMCID 有多个 MinerU 结果时，确定性选择有效图片引用和正文结构更完整的一份。
+- `--metadata-jsonl` 可指向单个 JSONL 或目录，用于补充标题和来源元数据。
+- `article_inventory.sqlite3` 保存 Markdown 清单，避免每次递归扫描大型 NFS 目录。输入目录变化后必须使用 `--refresh-inventory`。
 
-## MedCPT 长度保护
+无标准章节的旧论文仅在常规解析没有产生任何正文时，才保守恢复标题之后、References 之前的叙述文本，并标记为 `Unassigned`。仍然无法产生正文的论文写入 `errors.jsonl`，不会被静默计为成功。文档内完全相同且不关联图表的长文本块只保留第一次出现。
 
-业务规则以 180–260 words 为目标、320 words 为硬上限。448 MedCPT tokens硬上限应用于完整的 `Title + Section + Text` Embedding输入，而不只是正文。若单个句子本身超限，先尝试在分号/冒号处拆分；仍超限时才在单词边界强制拆分并记录警告。
+## MedCPT 长度
 
-默认加载 `ncbi/MedCPT-Article-Encoder` tokenizer。生产试运行建议明确要求该 tokenizer，避免静默使用回退计数器：
+正文目标为 180–260 words，320 words 为硬上限。448 tokens 的硬上限应用于完整的 `Title + Section + Text`。`token_count` 记录完整输入长度，`text_token_count` 仅记录正文长度。
+
+生产运行必须使用 MedCPT Article Encoder 的真实 tokenizer：
 
 ```bash
 python -m pip install -r scripts/medcpt_fulltext/requirements.txt
 ```
 
-如果117服务器不能访问 Hugging Face，可先在可联网环境下载模型缓存，再复制缓存到117；或者首次测试允许回退 tokenizer。实际使用的名称会写入每个chunk、documents和statistics。
+## 117服务器生产命令
 
-## 117服务器500篇命令
+首次使用正确的 `_nfs` 输入路径时刷新清单：
 
 ```bash
 cd /path/to/synbiogpt3
 
 python scripts/chunk_mineru_markdown.py \
   --input-dir /qiannanhu01_nfs/pdf_parse/jsonl_backup/output \
-  --output-dir /qiannanhu01_nfs/synbiogpt/backend/data/500PDF_r5 \
+  --output-dir /qiannanhu01_nfs/synbiogpt/backend/data/20000PDF_v1 \
   --inventory-db /qiannanhu01_nfs/synbiogpt/backend/data/article_inventory.sqlite3 \
   --refresh-inventory \
-  --limit 500 \
+  --limit 20000 \
+  --documents-per-shard 500 \
   --workers 8 \
   --tokenizer /qiannanhu01_nfs/models/MedCPT/Article-Encoder \
   --require-medcpt-tokenizer \
   --local-files-only
 ```
 
-可靠Markdown H1会直接作为论文标题。若确实需要补充解析耗时和 `source_file`，再增加：
+确认清单路径正确后，断点续跑时删除 `--refresh-inventory`。相同输入、参数和 tokenizer 会跳过已经成功提交到 `.spool/` 的论文；`--force` 才会强制重算。
 
-```bash
---metadata-jsonl /qiannanhu01_nfs/pdf_parse/jsonl_backup
-```
+## 生产输出
 
-读取该目录可能需要流式扫描多个大型JSONL，因此建议先在不带该参数的500篇试运行中检查正文切块。
-
-`--refresh-inventory` 只在首次构建或源目录内容变化后使用，第二次运行应删除该参数。未显式提供 `--inventory-db` 时，默认使用输出目录上一级的 `article_inventory.sqlite3`。
-
-首次建议从 `--workers 4` 或 `8` 开始，根据CPU和NFS读取负载调整。切块只使用CPU。在117的Linux环境中，worker会继承父进程已经加载的tokenizer，避免每个进程重复加载；worker数量也不会超过实际待处理论文数。
-
-## 断点续跑与输出
-
-每篇论文先写入：
+每500个已选择PMCID对应一个固定分片边界。失败论文不会改变后续论文的分片编号：
 
 ```text
-OUTPUT/.spool/{PMCID末三位}/{PMCID}.json.gz
-OUTPUT/.spool/{PMCID末三位}/{PMCID}.done.json
+OUTPUT/
+  chunks/part-00000.jsonl
+  parents/part-00000.jsonl
+  figures_tables/part-00000.jsonl
+  documents.jsonl
+  errors.jsonl
+  statistics.json
+  manifest.json
+  inspection_samples.jsonl
+  duplicate_resolution.jsonl
+  .spool/
 ```
 
-压缩结果完整落盘后才原子写入完成标记。再次运行相同输入、参数和tokenizer时默认跳过成功论文；使用 `--force` 可重新处理。全部论文处理结束后，程序按PMCID逐篇读取spool并流式写出，不会把2万篇的全部chunk同时载入内存；输出先写临时文件，再原子替换：
+程序流式归并，不会把2万篇的全部chunk载入内存。每个文件先写 `.partial`，完成后原子替换；相同输入重复运行产生稳定内容。
 
-```text
-chunks.jsonl
-parents.jsonl
-figures_tables.jsonl
-documents.jsonl
-errors.jsonl
-statistics.json
-inspection_samples.jsonl
-duplicate_resolution.jsonl
-```
+`manifest.json` 是下游唯一权威清单，记录每个分片的PMCID范围、成功/失败论文数、行数、逻辑内容SHA-256和文件大小。Embedding程序应按 `manifest.shards` 顺序读取 `files.chunks.path`，不要自行扫描目录。
 
-`figures_tables.jsonl` 只记录 Markdown 中能够识别的图表、相对图片路径、caption和相邻引用上下文。表格只有JPG时始终设置 `table_text_missing=true`，程序不调用OCR，也不会虚构表格单元格。
+`figures_tables` 保存已有caption、相对图片路径和邻近正文；只有JPG的表格保持 `table_text_missing=true`，不调用OCR。Embedding阶段按batch读取chunk的 `paper_title`、`section`、`subsection` 和 `text`，调用 `build_embedding_text()` 临时拼接，不在JSONL中重复保存 `embedding_text`。
 
-`chunks.jsonl` 不重复保存完整Embedding文本。后续Embedding程序流式读取 `paper_title`、`section`、`subsection` 和 `text`，调用同一个 `build_embedding_text()` 函数按batch临时拼接。`token_count`是完整输入的token数，`text_token_count`仅记录正文token数。
+## 验收顺序
 
-## 检查顺序
-
-1. 查看 `errors.jsonl`，确认失败原因。
-2. 查看 `statistics.json` 的超长块、短块、未知标题和标题异常数量。
-   同时比较 `discovery_seconds`、`tokenizer_load_seconds`、`document_processing_wall_seconds` 和 `merge_seconds`，判断耗时发生在哪个阶段。
-3. 人工检查 `inspection_samples.jsonl` 中固定随机种子抽取的20篇。
-4. 检查 `figures_tables.jsonl` 的图片路径、图号/表号和caption绑定。
-5. 500篇通过后再使用新的输出目录启动约2万篇，继续复用同一个inventory数据库，并保留pilot结果用于规则对比。
+1. 检查 `errors.jsonl`；命令退出码为2表示至少一篇失败，但成功分片仍会完整生成。
+2. 检查 `statistics.json` 中的超长块、短块、未知标题和零失败要求。
+3. 检查 `manifest.json` 的分片数、行数和PMCID边界。
+4. 人工查看 `inspection_samples.jsonl` 中固定种子抽取的论文。

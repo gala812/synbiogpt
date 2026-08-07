@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for the deterministic MinerU Markdown pilot chunker."""
+"""CLI entry point for deterministic MinerU Markdown production chunking."""
 
 from medcpt_fulltext.cli import main
 
