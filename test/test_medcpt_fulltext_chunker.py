@@ -135,19 +135,26 @@ Reference entry that is excluded from text chunks.
 A
 ![](images/panel_b.jpg)
 Figure 1. Multi-panel response of the engineered circuit.
+
+![](images/panel_c.jpg)
+Figure 1. Cont.
+
+Funding: This boilerplate funding statement must not be indexed.
 """
     path = _write_paper(
         tmp_path,
         "PMC0000003",
         markdown,
-        ["panel_a.jpg", "panel_b.jpg"],
+        ["panel_a.jpg", "panel_b.jpg", "panel_c.jpg"],
     )
     document = parse_document(path, "PMC0000003")
     assert len(document.assets) == 1
     asset = document.assets[0]
-    assert asset.image_paths == ["images/panel_a.jpg", "images/panel_b.jpg"]
+    assert asset.image_paths == ["images/panel_a.jpg", "images/panel_b.jpg", "images/panel_c.jpg"]
     assert asset.section == "Results"
     assert asset.context_before.startswith("result0")
+    assert "continued_asset_merged" in asset.parse_warnings
+    assert document.excluded_counts["inline_non_body"] == 1
     assert any(
         "equation_number_without_body" in block.warnings
         for block in document.blocks

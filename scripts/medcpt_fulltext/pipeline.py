@@ -24,6 +24,7 @@ from .tokenization import MEDCPT_TOKENIZER, TokenCounter, resolve_tokenizer
 
 
 SCHEMA_VERSION = "medcpt_markdown_chunk_v1"
+PIPELINE_REVISION = "pilot_rules_r2"
 PMCID_RE = re.compile(r"^PMC\d+$", re.I)
 JSON_ID_RE = re.compile(rb'"(?:id|doc_id|pmcid)"\s*:\s*"(PMC\d+)"', re.I)
 
@@ -196,6 +197,7 @@ def _source_signature(candidate: DocumentCandidate, metadata: dict[str, Any], co
     stat = candidate.markdown_path.stat()
     return {
         "schema_version": SCHEMA_VERSION,
+        "pipeline_revision": PIPELINE_REVISION,
         "config_hash": config_hash,
         "source_path": str(candidate.markdown_path),
         "source_size": stat.st_size,
@@ -239,6 +241,7 @@ def _document_record(
     }
     return {
         "schema_version": SCHEMA_VERSION,
+        "pipeline_revision": PIPELINE_REVISION,
         "doc_id": document.pmcid,
         "pmcid": document.pmcid,
         "paper_title": document.paper_title,
@@ -273,6 +276,7 @@ def _document_record(
 def _asset_record(asset: Any, document: Any) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
+        "pipeline_revision": PIPELINE_REVISION,
         "doc_id": document.pmcid,
         "pmcid": document.pmcid,
         "paper_title": document.paper_title,
@@ -413,6 +417,7 @@ def _write_final_outputs(
     )
     statistics_row = {
         "schema_version": SCHEMA_VERSION,
+        "pipeline_revision": PIPELINE_REVISION,
         "successful_documents": len(documents),
         "failed_documents": len(failed),
         "skipped_documents": skipped_count,
@@ -529,6 +534,7 @@ def run_pipeline(
         _json_bytes(
             {
                 "schema_version": SCHEMA_VERSION,
+                "pipeline_revision": PIPELINE_REVISION,
                 "chunking": config_payload,
                 "tokenizer_name": resolved_name,
                 "require_images": require_images,

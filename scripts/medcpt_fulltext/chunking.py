@@ -241,11 +241,17 @@ def _asset_reference_ids(text: str, assets: list[Asset]) -> tuple[list[str], lis
     tables: list[str] = []
     paths: list[str] = []
     for asset in assets:
-        number = re.search(r"\b(S?\d+[A-Za-z]?|[IVXLC]+)\b", asset.label, re.I)
+        number = re.search(r"\b(S?\d+)([A-Za-z]?)\b", asset.label, re.I)
         if not number:
-            continue
+            number = re.search(r"\b([IVXLC]+)\b", asset.label, re.I)
+            if not number:
+                continue
         prefix = r"(?:Fig(?:ure)?\.?)" if asset.asset_type == "figure" else r"Table"
-        if re.search(rf"\b{prefix}s?\s*{re.escape(number.group(1))}\b", text, re.I):
+        base = re.escape(number.group(1))
+        suffix = ""
+        if number.lastindex and number.lastindex >= 2:
+            suffix = re.escape(number.group(2)) if number.group(2) else r"[A-Za-z]?"
+        if re.search(rf"\b{prefix}s?\s*{base}{suffix}\b", text, re.I):
             (figures if asset.asset_type == "figure" else tables).append(asset.asset_id)
             paths.extend(asset.image_paths)
     return sorted(set(figures)), sorted(set(tables)), sorted(set(paths))
@@ -403,6 +409,14 @@ def chunk_units(
                 output[index - 1] = combined
                 output.pop(index)
         index -= 1
+    for unit in output:
+        if (
+            word_count(unit.text) < config.min_chunk_words
+            and unit.kind not in {"figure_caption", "table_caption"}
+        ):
+            unit.warnings = sorted(
+                set(unit.warnings + ["short_chunk_unavoidable_same_subsection_boundary"])
+            )
     return sorted(output, key=lambda unit: unit.order)
 
 

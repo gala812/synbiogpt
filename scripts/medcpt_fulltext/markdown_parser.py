@@ -15,12 +15,37 @@ EQUATION_START_RE = re.compile(r"^\s*(?:\$\$|\\\[|\\begin\{(?:equation|align|gat
 EQUATION_NUMBER_ONLY_RE = re.compile(r"^\s*\(\s*\d+[A-Za-z]?\s*\)\s*$")
 TABLE_CAPTION_RE = re.compile(r"^\s*(?P<label>Table\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:\-]?\s*(?P<body>.*)$", re.I | re.S)
 FIGURE_CAPTION_RE = re.compile(r"^\s*(?P<label>(?:Figure|Fig\.)\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:\-]?\s*(?P<body>.*)$", re.I | re.S)
+EMBEDDED_TABLE_CAPTION_RE = re.compile(r"(?<!\w)(?P<label>Table\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:]\s*(?P<body>.*)$", re.I | re.S)
+EMBEDDED_FIGURE_CAPTION_RE = re.compile(r"(?<!\w)(?P<label>(?:Figure|Fig\.)\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:]\s*(?P<body>.*)$", re.I | re.S)
+MANGLED_FIGURE_CAPTION_RE = re.compile(
+    r"^\s*(?P<label>(?:igure|gure|ure)\s+(?:S?\d+[A-Za-z]?|[IVXLC]+))\s*[.:]\s*(?P<body>.*)$",
+    re.I | re.S,
+)
 
 AD_PHRASES = (
     "submit your next manuscript",
     "convenient online submission",
     "thorough peer review",
     "no space constraints",
+)
+
+INLINE_NON_BODY_RE = re.compile(
+    r"^\s*(?:"
+    r"Author Contributions?|Authors['’]? Contributions?|"
+    r"Acknowledgements?|Acknowledgments?|"
+    r"Funding(?: Information)?|"
+    r"Data Availability(?: Statement)?|Availability of Data and Materials|"
+    r"Conflicts? of Interest|Competing Interests?|"
+    r"Institutional Review Board Statement|Informed Consent Statement|"
+    r"Consent for Publication|Ethics Approval and Consent to Participate|"
+    r"Publisher['’]?s Note|Declarations?"
+    r")\s*:",
+    re.I,
+)
+
+NON_BODY_FIXED_PHRASES = (
+    "refer to web version on pubmed central for supplementary material",
+    "the following supporting information can be downloaded",
 )
 
 EXCLUDED_SECTION_KEYS = {
@@ -105,6 +130,33 @@ def _is_page_marker(text: str) -> bool:
 def _is_advertisement(text: str) -> bool:
     lower = text.lower()
     return any(phrase in lower for phrase in AD_PHRASES)
+
+
+def _is_inline_non_body(text: str) -> bool:
+    lower = text.lower()
+    return bool(INLINE_NON_BODY_RE.match(text)) or any(
+        phrase in lower for phrase in NON_BODY_FIXED_PHRASES
+    )
+
+
+def _repair_corrupted_heading(text: str) -> tuple[str, list[str]]:
+    """Repair only obvious duplicated or page-merged MinerU headings."""
+
+    value = text.strip()
+    warnings: list[str] = []
+    midpoint = len(value) // 2
+    if len(value) >= 20 and len(value) % 2 == 0:
+        left, right = value[:midpoint].strip(), value[midpoint:].strip()
+        if left and left.casefold() == right.casefold():
+            return left, ["repaired_duplicate_heading"]
+
+    markers = list(re.finditer(r"\b\d+(?:\.\d+)+\.\s+(?=[A-Z])", value))
+    if markers:
+        last = markers[-1]
+        prefix = value[: last.start()].strip()
+        if last.start() > 0 and (len(prefix.split()) >= 4 or len(markers) > 1):
+            return value[last.start() :].strip(), ["repaired_page_merged_heading"]
+    return value, warnings
 
 
 def _valid_title(text: str) -> bool:
@@ -283,6 +335,8 @@ def _assign_structure_and_exclusions(
 
     for block in blocks:
         if block.kind == "heading":
+            block.text, heading_repairs = _repair_corrupted_heading(block.text)
+            block.warnings.extend(heading_repairs)
             main = canonical_main_section(block.text)
             if main:
                 section, subsection = main, ""
@@ -303,8 +357,17 @@ def _assign_structure_and_exclusions(
                 subsection = block.text
                 if subsection not in section_tree[section]:
                     section_tree[section].append(subsection)
-                unknown.append(block.text)
-                block.warnings.append("unknown_heading_as_subsection")
+                heading_body = re.sub(
+                    r"^\s*\d+(?:\.\d+)*\.?\s+", "", subsection
+                )
+                confident_subsection = (
+                    section != "Front Matter"
+                    and len(subsection.split()) <= 20
+                    and not re.search(r"[.!?]\s+\S", heading_body)
+                )
+                if not confident_subsection:
+                    unknown.append(block.text)
+                    block.warnings.append("unknown_heading_as_subsection")
             block.section, block.subsection = section, subsection
             if references_seen and section == "References":
                 block.excluded_reason = block.excluded_reason or "references"
@@ -329,6 +392,10 @@ def _assign_structure_and_exclusions(
         if _is_advertisement(block.text):
             block.excluded_reason = "publisher_advertisement"
             excluded["advertisement"] += 1
+            continue
+        if _is_inline_non_body(block.text):
+            block.excluded_reason = "inline_non_body"
+            excluded["inline_non_body"] += 1
             continue
         if section == "Front Matter" and block.kind != "image":
             block.excluded_reason = "front_matter"
@@ -373,27 +440,56 @@ def _caption_match(block: SourceBlock) -> tuple[str, re.Match[str]] | None:
     figure = FIGURE_CAPTION_RE.match(block.text)
     if figure:
         return "figure", figure
+    figure = MANGLED_FIGURE_CAPTION_RE.match(block.text)
+    if figure:
+        return "figure", figure
+    table = EMBEDDED_TABLE_CAPTION_RE.search(block.text)
+    if table and len(
+        re.findall(re.escape(table.group("label")), block.text, re.I)
+    ) >= 2:
+        return "table", table
+    figure = EMBEDDED_FIGURE_CAPTION_RE.search(block.text)
+    if figure and len(
+        re.findall(re.escape(figure.group("label")), block.text, re.I)
+    ) >= 2:
+        return "figure", figure
     return None
 
 
 def _nearest_images(blocks: list[SourceBlock], index: int, asset_type: str) -> list[SourceBlock]:
     directions = (1, -1) if asset_type == "table" else (-1, 1)
+    caption_block = blocks[index]
+    post_references = caption_block.section == "References"
     for direction in directions:
         found: list[SourceBlock] = []
         cursor = index + direction
         steps = 0
-        while 0 <= cursor < len(blocks) and steps < 12:
+        max_steps = 50 if post_references else 16
+        while 0 <= cursor < len(blocks) and steps < max_steps:
             candidate = blocks[cursor]
             if candidate.kind == "image":
                 found.append(candidate)
                 cursor += direction
                 steps += 1
                 continue
+            if candidate.kind == "heading" or _caption_match(candidate):
+                break
             if candidate.excluded_reason and candidate.excluded_reason != "references":
                 cursor += direction
                 steps += 1
                 continue
             if candidate.kind == "paragraph" and re.fullmatch(r"[A-Ha-h]", candidate.text.strip()):
+                cursor += direction
+                steps += 1
+                continue
+            if post_references:
+                cursor += direction
+                steps += 1
+                continue
+            if found and (
+                len(candidate.text.split()) <= 45
+                or re.match(r"^(?:[A-Ha-h]\b|[A-Z]\d?\s*[-:]?\s*vs\b)", candidate.text, re.I)
+            ):
                 cursor += direction
                 steps += 1
                 continue
@@ -404,8 +500,14 @@ def _nearest_images(blocks: list[SourceBlock], index: int, asset_type: str) -> l
 
 
 def _reference_pattern(asset_type: str, label: str) -> re.Pattern[str]:
-    number_match = re.search(r"\b(S?\d+[A-Za-z]?|[IVXLC]+)\b", label, re.I)
-    number = re.escape(number_match.group(1)) if number_match else r"\d+"
+    number_match = re.search(r"\b(S?\d+)([A-Za-z]?)\b", label, re.I)
+    if number_match:
+        base = re.escape(number_match.group(1))
+        suffix = re.escape(number_match.group(2)) if number_match.group(2) else r"[A-Za-z]?"
+        number = base + suffix
+    else:
+        roman = re.search(r"\b([IVXLC]+)\b", label, re.I)
+        number = re.escape(roman.group(1)) if roman else r"\d+"
     prefix = r"(?:Fig(?:ure)?\.?|Figures?)" if asset_type == "figure" else r"Tables?"
     return re.compile(rf"\b{prefix}\s*{number}\b", re.I)
 
@@ -440,10 +542,25 @@ def bind_assets(blocks: list[SourceBlock], pmcid: str) -> list[Asset]:
         if not matched:
             continue
         asset_type, match = matched
-        counters[asset_type] += 1
-        label = re.sub(r"\s+", " ", match.group("label")).strip()
-        label = re.sub(r"^Fig\.", "Figure", label, flags=re.I)
+        caption_text = block.text[match.start() :].strip()
+        raw_label = re.sub(r"\s+", " ", match.group("label")).strip()
+        label_number = re.search(r"\b(S?\d+[A-Za-z]?|[IVXLC]+)\b", raw_label, re.I)
+        if asset_type == "figure" and label_number:
+            label = f"Figure {label_number.group(1)}"
+            caption_text = re.sub(
+                r"^\s*(?:Figure|Fig\.|igure|gure|ure)\s+" + re.escape(label_number.group(1)),
+                label,
+                caption_text,
+                count=1,
+                flags=re.I,
+            )
+        else:
+            label = re.sub(r"^Fig\.", "Figure", raw_label, flags=re.I)
         images = _nearest_images(blocks, index, asset_type)
+        if not images:
+            block.warnings.append("caption_like_text_without_adjacent_image")
+            continue
+        counters[asset_type] += 1
         asset_id = f"{pmcid}_{asset_type}_{counters[asset_type]:04d}"
         for image in images:
             image.asset_id = asset_id
@@ -469,8 +586,6 @@ def bind_assets(blocks: list[SourceBlock], pmcid: str) -> list[Asset]:
                 asset_section = "Unassigned"
                 asset_subsection = ""
                 warnings.append("post_references_asset_section_unresolved")
-        if not images:
-            warnings.append("caption_without_adjacent_image")
         notes = ""
         if asset_type == "table" and images:
             last_image_index = max(blocks.index(image) for image in images)
@@ -503,7 +618,44 @@ def bind_assets(blocks: list[SourceBlock], pmcid: str) -> list[Asset]:
                 parse_warnings=warnings,
             )
         )
-    return assets
+        assets[-1].caption = caption_text
+    return _merge_continued_assets(assets)
+
+
+def _asset_label_key(asset: Asset) -> tuple[str, str]:
+    number = re.search(r"\b(S?\d+|[IVXLC]+)\b", asset.label, re.I)
+    return asset.asset_type, number.group(1).upper() if number else asset.label.upper()
+
+
+def _merge_continued_assets(assets: list[Asset]) -> list[Asset]:
+    merged: list[Asset] = []
+    by_label: dict[tuple[str, str], Asset] = {}
+    for asset in assets:
+        key = _asset_label_key(asset)
+        primary = by_label.get(key)
+        if primary is None:
+            by_label[key] = asset
+            merged.append(asset)
+            continue
+        for path in asset.image_paths:
+            if path not in primary.image_paths:
+                primary.image_paths.append(path)
+        primary.char_start = min(primary.char_start, asset.char_start)
+        primary.char_end = max(primary.char_end, asset.char_end)
+        primary.order = min(primary.order, asset.order)
+        if len(asset.caption) > len(primary.caption) and "cont." not in asset.caption[:40].lower():
+            primary.caption = asset.caption
+        if not primary.context_before:
+            primary.context_before = asset.context_before
+        if not primary.context_after:
+            primary.context_after = asset.context_after
+        if primary.section == "Unassigned" and asset.section != "Unassigned":
+            primary.section, primary.subsection = asset.section, asset.subsection
+        primary.mapping_confidence = "high" if primary.image_paths else primary.mapping_confidence
+        primary.parse_warnings = sorted(
+            set(primary.parse_warnings + asset.parse_warnings + ["continued_asset_merged"])
+        )
+    return merged
 
 
 def parse_document(
@@ -533,6 +685,7 @@ def parse_document(
     )
     parse_warnings.extend(structural_warnings)
     assets = bind_assets(blocks, pmcid)
+    parse_warnings.extend(warning for block in blocks for warning in block.warnings)
     parse_warnings.extend(warning for asset in assets for warning in asset.parse_warnings)
     source_file = str(
         metadata.get("source_file")
