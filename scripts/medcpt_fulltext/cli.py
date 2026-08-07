@@ -30,7 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Rescan the input tree and atomically rebuild the reusable inventory.",
     )
-    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Maximum papers to process; defaults to all eligible papers (0).",
+    )
     parser.add_argument(
         "--documents-per-shard",
         type=int,

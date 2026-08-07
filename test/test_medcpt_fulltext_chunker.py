@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from scripts.medcpt_fulltext.chunking import build_embedding_text, create_chunks
+from scripts.medcpt_fulltext.cli import build_parser
 from scripts.medcpt_fulltext.markdown_parser import parse_document
 from scripts.medcpt_fulltext.models import ChunkingConfig
 from scripts.medcpt_fulltext.pipeline import discover_documents, run_pipeline
@@ -23,6 +24,12 @@ def _write_paper(root: Path, pmcid: str, markdown: str, image_names: list[str]) 
     path = auto / f"{pmcid}.md"
     path.write_text(markdown, encoding="utf-8")
     return path
+
+
+def test_cli_defaults_to_all_documents_and_500_per_shard() -> None:
+    args = build_parser().parse_args(["--input-dir", "input", "--output-dir", "output"])
+    assert args.limit == 0
+    assert args.documents_per_shard == 500
 
 
 def test_parser_repairs_sections_binds_assets_and_excludes_non_body(tmp_path: Path) -> None:

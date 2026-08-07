@@ -944,7 +944,7 @@ def run_pipeline(
     input_dir: Path,
     output_dir: Path,
     metadata_jsonl: Path | None = None,
-    limit: int = 500,
+    limit: int = 0,
     workers: int = 1,
     tokenizer_name: str = MEDCPT_TOKENIZER,
     allow_tokenizer_fallback: bool = True,

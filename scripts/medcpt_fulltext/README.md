@@ -6,7 +6,7 @@
 
 - 递归扫描 `--input-dir` 下文件名为 `PMC*.md` 的论文。
 - 默认只选择同级 `images/` 非空的论文；`--include-without-images` 可关闭限制。
-- 按 PMCID 排序并处理前 `--limit` 篇；`--limit 0` 表示全部。
+- 按 PMCID 排序并处理全部符合条件的论文；仅在试运行时使用 `--limit N` 限制数量。
 - 同一 PMCID 有多个 MinerU 结果时，确定性选择有效图片引用和正文结构更完整的一份。
 - `--metadata-jsonl` 可指向单个 JSONL 或目录，用于补充标题和来源元数据。
 - `article_inventory.sqlite3` 保存 Markdown 清单，避免每次递归扫描大型 NFS 目录。输入目录变化后必须使用 `--refresh-inventory`。
@@ -35,8 +35,6 @@ python scripts/chunk_mineru_markdown.py \
   --output-dir /qiannanhu01_nfs/synbiogpt/backend/data/20000PDF_v1 \
   --inventory-db /qiannanhu01_nfs/synbiogpt/backend/data/article_inventory.sqlite3 \
   --refresh-inventory \
-  --limit 20000 \
-  --documents-per-shard 500 \
   --workers 8 \
   --tokenizer /qiannanhu01_nfs/models/MedCPT/Article-Encoder \
   --require-medcpt-tokenizer \
@@ -47,7 +45,7 @@ python scripts/chunk_mineru_markdown.py \
 
 ## 生产输出
 
-每500个已选择PMCID对应一个固定分片边界。失败论文不会改变后续论文的分片编号：
+默认每500个已选择PMCID对应一个固定分片边界。失败论文不会改变后续论文的分片编号；仅在确有需要时使用 `--documents-per-shard N` 修改默认值：
 
 ```text
 OUTPUT/
