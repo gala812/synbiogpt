@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import scripts.medcpt_fulltext.pipeline as pipeline_module
 from scripts.medcpt_fulltext.chunking import build_embedding_text, create_chunks
 from scripts.medcpt_fulltext.cli import build_parser
 from scripts.medcpt_fulltext.markdown_parser import parse_document
@@ -349,7 +350,9 @@ Reference text that must be excluded.
     assert sum(chunk["text"].count("repeated0") for chunk in chunks) == 1
 
 
-def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path: Path) -> None:
+def test_discovery_deduplicates_and_pipeline_streams_deterministically(
+    tmp_path: Path, monkeypatch: object
+) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "output"
     inventory_db = tmp_path / "article_inventory.sqlite3"
@@ -379,6 +382,16 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
     assert candidates[0].markdown_path == first
     assert len(candidates[0].duplicate_paths) == 1
 
+    original_finalizer = pipeline_module._finalize_streaming_outputs
+    live_output_checks: list[bool] = []
+
+    def checked_finalizer(*args: object, **kwargs: object) -> dict[str, object]:
+        live_path = output_root / "chunks" / "part-00000.jsonl"
+        live_output_checks.append(live_path.is_file() and live_path.stat().st_size > 0)
+        return original_finalizer(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "_finalize_streaming_outputs", checked_finalizer)
+
     stats1 = run_pipeline(
         input_dir=input_root,
         output_dir=output_root,
@@ -403,12 +416,12 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
 
     assert stats1["successful_documents"] == 2
     assert stats1["failed_documents"] == 0
-    assert stats2["skipped_documents"] == 2
+    assert stats2["skipped_documents"] == 0
     assert stats1["inventory_reused"] is False
     assert stats1["inventory_build_seconds"] > 0
     assert stats2["inventory_reused"] is True
     assert stats2["inventory_build_seconds"] == 0
-    assert stats2["worker_start_method"] == "none"
+    assert stats2["worker_start_method"] == "single"
     assert chunks_before == chunks_after
     expected = {
         "chunks",
@@ -421,6 +434,7 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
         "inspection_samples.jsonl",
     }
     assert expected.issubset({path.name for path in output_root.iterdir()})
+    assert all(live_output_checks)
     assert len(chunk_parts) == 2
     rows = []
     for path in chunk_parts:
@@ -444,7 +458,7 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
     assert stats["documents_per_shard"] == 1
     assert stats["shard_count"] == 2
     manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["output_layout"] == "document_count_jsonl_shards_v1"
+    assert manifest["output_layout"] == "streaming_jsonl_shards_no_resume_v1"
     assert [shard["selected_document_count"] for shard in manifest["shards"]] == [1, 1]
     assert all(shard["failed_document_count"] == 0 for shard in manifest["shards"])
 
@@ -475,3 +489,36 @@ def test_zero_chunk_document_is_reported_as_failure(tmp_path: Path) -> None:
         for line in (output_root / "errors.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert errors[0]["error_message"] == "No searchable body chunks were produced"
+
+
+def test_multiworker_streams_shards_in_pmcid_order(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    body = _words("result", 190)
+    for number in (40, 10, 30, 20):
+        pmcid = f"PMC{number:07d}"
+        _write_paper(
+            input_root / str(number),
+            pmcid,
+            f"# Reliable Paper {number}\n\n## Results\n\n{body}\n",
+            ["unused.jpg"],
+        )
+
+    stats = run_pipeline(
+        input_dir=input_root,
+        output_dir=output_root,
+        limit=4,
+        workers=2,
+        tokenizer_name="generic:test_v1",
+        documents_per_shard=2,
+    )
+
+    observed: list[str] = []
+    for path in sorted((output_root / "chunks").glob("part-*.jsonl")):
+        observed.extend(
+            json.loads(line)["pmcid"]
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    assert observed == sorted(observed)
+    assert stats["effective_workers"] == 2
+    assert stats["successful_documents"] == 4

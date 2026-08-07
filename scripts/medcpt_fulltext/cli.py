@@ -55,7 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include Markdown papers whose sibling images directory is empty/missing.",
     )
-    parser.add_argument("--force", action="store_true", help="Reprocess successfully committed papers.")
     parser.add_argument("--inspection-seed", type=int, default=20260806)
     return parser
 
@@ -73,7 +72,6 @@ def main() -> int:
         allow_tokenizer_fallback=not args.require_medcpt_tokenizer,
         local_files_only=args.local_files_only,
         require_images=not args.include_without_images,
-        force=args.force,
         inventory_db=inventory_db,
         refresh_inventory=args.refresh_inventory,
         inspection_seed=args.inspection_seed,

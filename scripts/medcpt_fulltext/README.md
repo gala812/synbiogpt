@@ -32,7 +32,7 @@ cd /path/to/synbiogpt3
 
 python scripts/chunk_mineru_markdown.py \
   --input-dir /qiannanhu01_nfs/pdf_parse/jsonl_backup/output \
-  --output-dir /qiannanhu01_nfs/synbiogpt/backend/data/20000PDF_v1 \
+  --output-dir /qiannanhu01_nfs/synbiogpt/backend/data/allPDF_v1 \
   --inventory-db /qiannanhu01_nfs/synbiogpt/backend/data/article_inventory.sqlite3 \
   --refresh-inventory \
   --workers 8 \
@@ -41,7 +41,7 @@ python scripts/chunk_mineru_markdown.py \
   --local-files-only
 ```
 
-确认清单路径正确后，断点续跑时删除 `--refresh-inventory`。相同输入、参数和 tokenizer 会跳过已经成功提交到 `.spool/` 的论文；`--force` 才会强制重算。
+清单首次建立后，后续运行可删除 `--refresh-inventory`，避免重新扫描NFS。切块结果不支持断点续跑；再次执行会清空既有生产分片并从第一篇重新处理。
 
 ## 生产输出
 
@@ -58,14 +58,13 @@ OUTPUT/
   manifest.json
   inspection_samples.jsonl
   duplicate_resolution.jsonl
-  .spool/
 ```
 
-程序流式归并，不会把2万篇的全部chunk载入内存。每个文件先写 `.partial`，完成后原子替换；相同输入重复运行产生稳定内容。
+每篇论文处理完成后，主进程立即按PMCID顺序把子块、父块和图表记录写入对应分片，因此运行期间即可查看或 `tail` 当前JSONL。并行任务采用有界队列，程序不会把全部chunk载入内存。若运行中断，已有JSONL会保留供排查，但重新执行会从头清空并重写。
 
 `manifest.json` 是下游唯一权威清单，记录每个分片的PMCID范围、成功/失败论文数、行数、逻辑内容SHA-256和文件大小。Embedding程序应按 `manifest.shards` 顺序读取 `files.chunks.path`，不要自行扫描目录。
 
-`figures_tables` 保存已有caption、相对图片路径和邻近正文；只有JPG的表格保持 `table_text_missing=true`，不调用OCR。Embedding阶段按batch读取chunk的 `paper_title`、`section`、`subsection` 和 `text`，调用 `build_embedding_text()` 临时拼接，不在JSONL中重复保存 `embedding_text`。
+`figures_tables/part-*.jsonl` 保存已有caption、相对图片路径和邻近正文；只有JPG的表格保持 `table_text_missing=true`，不调用OCR。Embedding阶段按batch读取chunk的 `paper_title`、`section`、`subsection` 和 `text`，调用 `build_embedding_text()` 临时拼接，不在JSONL中重复保存 `embedding_text`。
 
 ## 验收顺序
 
