@@ -48,6 +48,11 @@ NON_BODY_FIXED_PHRASES = (
     "the following supporting information can be downloaded",
 )
 
+PANEL_COMPARISON_RE = re.compile(
+    r"^(?:[A-Z]+\d*|R\d+|S\d+)\s*[-:]?\s*vs\.?\s*[-:]?\s*(?:[A-Z]+\d*|R\d+|S\d+)$",
+    re.I,
+)
+
 EXCLUDED_SECTION_KEYS = {
     "acknowledgement",
     "acknowledgements",
@@ -139,8 +144,50 @@ def _is_inline_non_body(text: str) -> bool:
     )
 
 
-def _repair_corrupted_heading(text: str) -> tuple[str, list[str]]:
-    """Repair only obvious duplicated or page-merged MinerU headings."""
+def _is_figure_panel_artifact(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if (
+        len(text.split()) <= 25
+        and not FIGURE_CAPTION_RE.match(text)
+        and re.search(r"\bFigure\s+S?\d+[A-Za-z]?\.\s*Cont\.?", text, re.I)
+    ):
+        return True
+    return all(
+        PANEL_COMPARISON_RE.fullmatch(line)
+        or re.fullmatch(r"[A-Ha-h]", line)
+        for line in lines
+    )
+
+
+SECTION_NUMBER_RE = re.compile(
+    r"(?P<number>\d+(?:\.\d+)+)(?:\.)?\s+(?=[A-Z])"
+)
+
+
+def _section_number_candidates(text: str) -> list[tuple[tuple[int, ...], int]]:
+    return [
+        (tuple(int(value) for value in match.group("number").split(".")), match.start())
+        for match in SECTION_NUMBER_RE.finditer(text)
+    ]
+
+
+def _numbers_are_adjacent(left: tuple[int, ...], right: tuple[int, ...]) -> bool:
+    return (
+        len(left) == len(right)
+        and len(left) >= 2
+        and left[:-1] == right[:-1]
+        and right[-1] == left[-1] + 1
+    )
+
+
+def _repair_corrupted_heading(
+    text: str,
+    previous_numbers: list[tuple[int, ...]],
+    next_numbers: list[tuple[int, ...]],
+) -> tuple[str, list[str]]:
+    """Repair page-merged headings only when adjacent numbering supports the split."""
 
     value = text.strip()
     warnings: list[str] = []
@@ -150,13 +197,43 @@ def _repair_corrupted_heading(text: str) -> tuple[str, list[str]]:
         if left and left.casefold() == right.casefold():
             return left, ["repaired_duplicate_heading"]
 
-    markers = list(re.finditer(r"\b\d+(?:\.\d+)+\.\s+(?=[A-Z])", value))
-    if markers:
-        last = markers[-1]
-        prefix = value[: last.start()].strip()
-        if last.start() > 0 and (len(prefix.split()) >= 4 or len(markers) > 1):
-            return value[last.start() :].strip(), ["repaired_page_merged_heading"]
+    candidates = _section_number_candidates(value)
+    for number, start in reversed(candidates):
+        if start <= 0:
+            continue
+        suffix = value[start:].strip()
+        suffix_body = SECTION_NUMBER_RE.match(suffix)
+        heading_words = suffix_body.group(0) if suffix_body else ""
+        remainder = suffix[len(heading_words) :].strip()
+        plausible_suffix = 1 <= len(remainder.split()) <= 20 and not re.search(
+            r"[.!?]\s+\S", remainder
+        )
+        supported = any(_numbers_are_adjacent(previous, number) for previous in previous_numbers)
+        supported = supported or any(_numbers_are_adjacent(number, following) for following in next_numbers)
+        if plausible_suffix and supported:
+            return suffix, ["repaired_page_merged_heading_sequence"]
+        if plausible_suffix:
+            warnings.append("possible_page_merged_heading_unverified")
     return value, warnings
+
+
+def _repair_corrupted_headings(blocks: list[SourceBlock]) -> None:
+    heading_indexes = [index for index, block in enumerate(blocks) if block.kind == "heading"]
+    numbers_by_index = {
+        index: [number for number, _ in _section_number_candidates(blocks[index].text)]
+        for index in heading_indexes
+    }
+    for position, index in enumerate(heading_indexes):
+        previous = numbers_by_index.get(heading_indexes[position - 1], []) if position else []
+        following = (
+            numbers_by_index.get(heading_indexes[position + 1], [])
+            if position + 1 < len(heading_indexes)
+            else []
+        )
+        blocks[index].text, repairs = _repair_corrupted_heading(
+            blocks[index].text, previous, following
+        )
+        blocks[index].warnings.extend(repairs)
 
 
 def _valid_title(text: str) -> bool:
@@ -333,10 +410,9 @@ def _assign_structure_and_exclusions(
     normalized_title = normalize_heading_key(paper_title)
     seen_main_section = False
 
+    _repair_corrupted_headings(blocks)
     for block in blocks:
         if block.kind == "heading":
-            block.text, heading_repairs = _repair_corrupted_heading(block.text)
-            block.warnings.extend(heading_repairs)
             main = canonical_main_section(block.text)
             if main:
                 section, subsection = main, ""
@@ -396,6 +472,10 @@ def _assign_structure_and_exclusions(
         if _is_inline_non_body(block.text):
             block.excluded_reason = "inline_non_body"
             excluded["inline_non_body"] += 1
+            continue
+        if _is_figure_panel_artifact(block.text):
+            block.excluded_reason = "figure_panel_artifact"
+            excluded["figure_panel_artifact"] += 1
             continue
         if section == "Front Matter" and block.kind != "image":
             block.excluded_reason = "front_matter"

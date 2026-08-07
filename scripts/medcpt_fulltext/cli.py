@@ -17,6 +17,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--metadata-jsonl", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--inventory-db",
+        type=Path,
+        help=(
+            "Reusable SQLite Markdown inventory. Defaults to "
+            "OUTPUT_DIR/../article_inventory.sqlite3."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-inventory",
+        action="store_true",
+        help="Rescan the input tree and atomically rebuild the reusable inventory.",
+    )
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--workers", type=int, default=max(1, min(8, (os.cpu_count() or 2) - 1)))
     parser.add_argument("--tokenizer", default=MEDCPT_TOKENIZER)
@@ -38,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    inventory_db = args.inventory_db or args.output_dir.parent / "article_inventory.sqlite3"
     stats = run_pipeline(
         input_dir=args.input_dir,
         metadata_jsonl=args.metadata_jsonl,
@@ -49,9 +63,10 @@ def main() -> int:
         local_files_only=args.local_files_only,
         require_images=not args.include_without_images,
         force=args.force,
+        inventory_db=inventory_db,
+        refresh_inventory=args.refresh_inventory,
         inspection_seed=args.inspection_seed,
         config=ChunkingConfig(),
     )
     print(json.dumps(stats, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if stats["failed_documents"] == 0 else 2
-

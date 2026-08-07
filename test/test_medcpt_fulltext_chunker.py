@@ -183,9 +183,58 @@ def test_forced_long_sentence_uses_word_overlap_without_exceeding_limits(tmp_pat
     assert first_words[-40:] == second_words[:40]
 
 
+def test_repairs_page_merged_subheading_and_excludes_panel_artifacts(tmp_path: Path) -> None:
+    markdown = f"""# Multiomics Analysis of an Engineered Biological System
+
+## Results
+
+## ITY_DN38401_c0_g1_i1_1, and TRINITY_DN3.3. Gene Ontology Analysis
+
+{_words('ontology', 100)}
+
+(GO:0005198)Figure 5. Cont.
+R1-vs-R0
+R0-vs-S0
+R1-vs-S1
+
+## of anthelmintics in susceptible strain3.4. KEGG Pathway Analysis
+
+R1 -vs- S1
+
+{_words('pathway', 100)}
+"""
+    path = _write_paper(tmp_path, "PMC0000005", markdown, ["unused.jpg"])
+    document = parse_document(path, "PMC0000005")
+    assert document.unknown_headings == []
+    assert document.section_tree["Results"] == [
+        "3.3. Gene Ontology Analysis",
+        "3.4. KEGG Pathway Analysis",
+    ]
+    assert document.excluded_counts["figure_panel_artifact"] == 2
+
+
+def test_does_not_repair_unverified_number_inside_heading(tmp_path: Path) -> None:
+    markdown = f"""# General Structural Repair Safety Study
+
+## Results
+
+## Protein construct version3.3. Analysis workflow
+
+{_words('result', 100)}
+"""
+    path = _write_paper(tmp_path, "PMC0000006", markdown, ["unused.jpg"])
+    document = parse_document(path, "PMC0000006")
+
+    assert document.section_tree["Results"] == [
+        "Protein construct version3.3. Analysis workflow"
+    ]
+    assert "possible_page_merged_heading_unverified" in document.parse_warnings
+
+
 def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "output"
+    inventory_db = tmp_path / "article_inventory.sqlite3"
     body = _words("result", 210)
     first = _write_paper(
         input_root / "a",
@@ -218,6 +267,7 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
         limit=2,
         workers=1,
         tokenizer_name="generic:test_v1",
+        inventory_db=inventory_db,
     )
     chunks_before = (output_root / "chunks.jsonl").read_bytes()
     stats2 = run_pipeline(
@@ -226,12 +276,18 @@ def test_discovery_deduplicates_and_pipeline_resumes_deterministically(tmp_path:
         limit=2,
         workers=1,
         tokenizer_name="generic:test_v1",
+        inventory_db=inventory_db,
     )
     chunks_after = (output_root / "chunks.jsonl").read_bytes()
 
     assert stats1["successful_documents"] == 2
     assert stats1["failed_documents"] == 0
     assert stats2["skipped_documents"] == 2
+    assert stats1["inventory_reused"] is False
+    assert stats1["inventory_build_seconds"] > 0
+    assert stats2["inventory_reused"] is True
+    assert stats2["inventory_build_seconds"] == 0
+    assert stats2["worker_start_method"] == "none"
     assert chunks_before == chunks_after
     expected = {
         "chunks.jsonl",
