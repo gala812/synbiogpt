@@ -124,6 +124,8 @@ _HYBRID_VECTOR_TOP_K = max(1, int(os.getenv("RAG_HYBRID_VECTOR_TOP_K", "100")))
 _HYBRID_RERANK_CANDIDATE_LIMIT = max(
     1, int(os.getenv("RAG_HYBRID_RERANK_CANDIDATE_LIMIT", "100"))
 )
+_HYBRID_RRF_K = max(1, int(os.getenv("RAG_HYBRID_RRF_K", "60")))
+_PAPER_ASSET_BASE_URL = os.getenv("PAPER_ASSET_BASE_URL", "").rstrip("/")
 
 
 def invalidate_collection_cache(collection_name: str) -> None:
@@ -132,6 +134,19 @@ def invalidate_collection_cache(collection_name: str) -> None:
 
 def _candidate_doc_id(metadata: dict, fallback: str = "") -> str:
     return str(metadata.get("doc_id") or metadata.get("id") or fallback)
+
+
+def _add_image_urls(metadata: dict) -> dict:
+    """Expose stable image URLs without leaking storage paths."""
+
+    keys = metadata.get("asset_keys") or []
+    if _PAPER_ASSET_BASE_URL and isinstance(keys, list):
+        metadata["image_urls"] = [
+            f"{_PAPER_ASSET_BASE_URL}/assets/{key}"
+            for key in keys
+            if isinstance(key, str) and len(key) == 64
+        ]
+    return metadata
 
 
 def _vector_result_to_documents(result) -> list[Document]:
@@ -145,7 +160,7 @@ def _vector_result_to_documents(result) -> list[Document]:
         if idx < len(ids):
             metadata.setdefault("vector_id", ids[idx])
         metadata.setdefault("retrieval_source", "vector")
-        docs.append(Document(page_content=text, metadata=metadata))
+        docs.append(Document(page_content=text, metadata=_add_image_urls(metadata)))
     return docs
 
 
@@ -159,7 +174,12 @@ def _bm25_results_to_documents(results: list[dict]) -> list[Document]:
             metadata["doc_id"] = str(doc_id)
         metadata["bm25_score"] = result.get("score")
         metadata["retrieval_source"] = "bm25"
-        docs.append(Document(page_content=result.get("text", ""), metadata=metadata))
+        docs.append(
+            Document(
+                page_content=result.get("text", ""),
+                metadata=_add_image_urls(metadata),
+            )
+        )
     return docs
 
 
@@ -168,20 +188,45 @@ def _merge_retrieval_candidates(
     vector_docs: list[Document],
     limit: int,
 ) -> list[Document]:
+    """Fuse lexical and dense ranks without comparing incomparable raw scores."""
+
+    candidates: dict[str, dict] = {}
+    for source, documents in (("bm25", bm25_docs), ("vector", vector_docs)):
+        for rank, doc in enumerate(documents, 1):
+            metadata = dict(doc.metadata or {})
+            doc_id = _candidate_doc_id(metadata)
+            key = doc_id or f"text:{doc.page_content[:200]}"
+            candidate = candidates.setdefault(
+                key,
+                {
+                    "page_content": doc.page_content,
+                    "metadata": metadata,
+                    "sources": set(),
+                    "score": 0.0,
+                    "best_rank": rank,
+                },
+            )
+            candidate["score"] += 1.0 / (_HYBRID_RRF_K + rank)
+            candidate["best_rank"] = min(candidate["best_rank"], rank)
+            candidate["sources"].add(source)
+            for field, value in metadata.items():
+                candidate["metadata"].setdefault(field, value)
+            candidate["metadata"][f"{source}_rank"] = rank
+
+    ranked = sorted(
+        candidates.items(),
+        key=lambda item: (-item[1]["score"], item[1]["best_rank"], item[0]),
+    )[:limit]
     merged: list[Document] = []
-    seen: set[str] = set()
-
-    for doc in [*bm25_docs, *vector_docs]:
-        metadata = dict(doc.metadata or {})
-        doc_id = _candidate_doc_id(metadata)
-        dedupe_key = doc_id or f"text:{doc.page_content[:200]}"
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        merged.append(Document(page_content=doc.page_content, metadata=metadata))
-        if len(merged) >= limit:
-            break
-
+    for _, candidate in ranked:
+        metadata = _add_image_urls(candidate["metadata"])
+        sources = sorted(candidate["sources"])
+        metadata["retrieval_source"] = "hybrid" if len(sources) > 1 else sources[0]
+        metadata["retrieval_sources"] = sources
+        metadata["rrf_score"] = candidate["score"]
+        merged.append(
+            Document(page_content=candidate["page_content"], metadata=metadata)
+        )
     return merged
 
 

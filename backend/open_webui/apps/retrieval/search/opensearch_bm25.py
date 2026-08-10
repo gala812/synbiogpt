@@ -58,8 +58,14 @@ def ensure_bm25_index(index_name: Optional[str] = None) -> str:
             "properties": {
                 "doc_id": {"type": "keyword"},
                 "collection_name": {"type": "keyword"},
+                "pmid": {"type": "keyword"},
+                "pmcid": {"type": "keyword"},
+                "source_shard": {"type": "keyword"},
+                "chunk_type": {"type": "keyword"},
+                "section": {"type": "keyword"},
                 "file_id": {"type": "keyword"},
                 "title": {"type": "text"},
+                "section_text": {"type": "text"},
                 "text": {"type": "text"},
                 "journal": {
                     "type": "text",
@@ -167,12 +173,17 @@ def search_bm25(
     query: str,
     top_k: int = 100,
     index_name: Optional[str] = None,
+    candidate_pmids: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     if not collection_names:
         return []
 
     index = _get_index_name(index_name)
     client = _get_client()
+    filters = [{"terms": {"collection_name": collection_names}}]
+    if candidate_pmids:
+        filters.append({"terms": {"pmid": [str(value) for value in candidate_pmids]}})
+
     body = {
         "size": top_k,
         "_source": [
@@ -180,6 +191,11 @@ def search_bm25(
             "text",
             "metadata",
             "title",
+            "pmid",
+            "pmcid",
+            "chunk_type",
+            "section",
+            "source_shard",
             "journal",
             "publication_date",
             "collection_name",
@@ -187,14 +203,12 @@ def search_bm25(
         ],
         "query": {
             "bool": {
-                "filter": [
-                    {"terms": {"collection_name": collection_names}},
-                ],
+                "filter": filters,
                 "must": [
                     {
                         "multi_match": {
                             "query": query,
-                            "fields": ["title^2", "text"],
+                            "fields": ["title^3", "section_text^1.5", "text"],
                         }
                     }
                 ],
@@ -213,6 +227,9 @@ def search_bm25(
             metadata["doc_id"] = str(doc_id)
         if source.get("collection_name"):
             metadata["collection_name"] = source.get("collection_name")
+        for field in ("pmid", "pmcid", "chunk_type", "section", "source_shard"):
+            if source.get(field) is not None:
+                metadata.setdefault(field, source[field])
 
         hits.append(
             {
