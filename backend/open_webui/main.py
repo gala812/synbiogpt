@@ -49,7 +49,21 @@ from open_webui.apps.openai.main import (
     get_all_models_responses as get_openai_models_responses,
 )
 from open_webui.apps.retrieval.main import app as retrieval_app
+from open_webui.apps.retrieval.synbio import RetrievalPipeline
+from open_webui.apps.retrieval.synbio.hooks import (
+    prepare_multimodal_messages,
+    protect_query_messages,
+)
 from open_webui.apps.retrieval.utils import get_sources_from_files
+
+
+RAG_MULTIMODAL_ENABLED = (
+    os.getenv("RAG_MULTIMODAL_ENABLED", "false").strip().lower() == "true"
+)
+RAG_MULTIMODAL_MAX_IMAGES = max(
+    0, int(os.getenv("RAG_MULTIMODAL_MAX_IMAGES", "16"))
+)
+SYNBIO_RETRIEVAL = RetrievalPipeline()
 
 
 from open_webui.apps.socket.main import (
@@ -80,6 +94,7 @@ from open_webui.config import (
     ENV,
     FRONTEND_BUILD_DIR,
     OAUTH_PROVIDERS,
+    OPENAI_MODEL,
     STATIC_DIR,
     TASK_MODEL,
     TASK_MODEL_EXTERNAL,
@@ -87,6 +102,7 @@ from open_webui.config import (
     ENABLE_RETRIEVAL_QUERY_GENERATION,
     QUERY_GENERATION_PROMPT_TEMPLATE,
     DEFAULT_QUERY_GENERATION_PROMPT_TEMPLATE,
+    DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE,
     TITLE_GENERATION_PROMPT_TEMPLATE,
     TAGS_GENERATION_PROMPT_TEMPLATE,
     ENABLE_AUTOCOMPLETE_GENERATION,
@@ -573,6 +589,7 @@ async def chat_completion_files_handler(
     sources = []
 
     if files := body.get("metadata", {}).get("files", None):
+        original_query = get_last_user_message(body["messages"])
         try:
             tq0 = time.perf_counter()
             queries_response = await generate_queries(
@@ -587,22 +604,11 @@ async def chat_completion_files_handler(
                 "[PERF] rag.query_rewrite duration=%.3fs status=ok",
                 time.perf_counter() - tq0,
             )
-            queries_response = queries_response["choices"][0]["message"]["content"]
-
-            try:
-                bracket_start = queries_response.find("{")
-                bracket_end = queries_response.rfind("}") + 1
-
-                if bracket_start == -1 or bracket_end == -1:
-                    raise Exception("No JSON object found in the response")
-
-                queries_response = queries_response[bracket_start:bracket_end]
-                queries_response = json.loads(queries_response)
-            except Exception as e:
-                queries_response = {"queries": [queries_response]}
-
-            queries = queries_response.get("queries", [])
-        except Exception as e:
+            generated = queries_response["choices"][0]["message"]["content"]
+            queries = [
+                SYNBIO_RETRIEVAL.process_generated_query(original_query, generated)
+            ]
+        except Exception:
             log.info(
                 "[PERF] rag.query_rewrite duration=%.3fs status=failed",
                 time.perf_counter() - tq0 if "tq0" in locals() else 0,
@@ -610,7 +616,13 @@ async def chat_completion_files_handler(
             queries = []
 
         if len(queries) == 0:
-            queries = [get_last_user_message(body["messages"])]
+            try:
+                queries = [SYNBIO_RETRIEVAL.process_query(original_query)]
+            except Exception:
+                log.exception(
+                    "Retrieval query generation failed and no English fallback is available"
+                )
+                queries = []
 
         tr0 = time.perf_counter()
         sources = get_sources_from_files(
@@ -855,6 +867,23 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                     ),
                     body["messages"],
                 )
+
+        if RAG_MULTIMODAL_ENABLED and len(sources) > 0:
+            body["messages"], retrieved_images, injected_images = (
+                prepare_multimodal_messages(
+                    body["messages"],
+                    sources,
+                    max_images=RAG_MULTIMODAL_MAX_IMAGES,
+                    add_system_message=add_or_update_system_message,
+                )
+            )
+            log.info(
+                "[MULTIMODAL-RAG] prepared Chinese evidence answer model=%s "
+                "retrieved_images=%d injected_images=%d",
+                body.get("model"),
+                retrieved_images,
+                injected_images,
+            )
 
         # If there are citations, add normalized sources to the data_items
         if len(citation_sources) > 0:
@@ -1395,10 +1424,18 @@ async def get_base_models(user=Depends(get_admin_user)):
 async def generate_chat_completions(
     form_data: dict, user=Depends(get_verified_user), bypass_filter: bool = False
 ):
+    if not form_data.get("model") and OPENAI_MODEL:
+        form_data = {**form_data, "model": OPENAI_MODEL}
+
     model_list = await get_all_models()
     models = {model["id"]: model for model in model_list}
 
-    model_id = form_data["model"]
+    model_id = form_data.get("model")
+    if not model_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No model selected; set OPENAI_MODEL or provide a model in the request",
+        )
     if model_id not in models:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2088,25 +2125,34 @@ async def generate_queries(form_data: dict, user=Depends(get_verified_user)):
 
     # Check if the user has a custom task model
     # If the user has a custom task model, use that model
-    task_model_id = get_task_model_id(
-        model_id,
-        app.state.config.TASK_MODEL,
-        app.state.config.TASK_MODEL_EXTERNAL,
-        models,
+    task_model_id = (
+        model_id
+        if type == "retrieval"
+        else get_task_model_id(
+            model_id,
+            app.state.config.TASK_MODEL,
+            app.state.config.TASK_MODEL_EXTERNAL,
+            models,
+        )
     )
 
     log.debug(
         f"generating {type} queries using model {task_model_id} for user {user.email}"
     )
 
-    if (app.state.config.QUERY_GENERATION_PROMPT_TEMPLATE).strip() != "":
+    messages = form_data["messages"]
+    if type == "retrieval":
+        template = DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE
+        original_query = get_last_user_message(messages)
+        messages = protect_query_messages(
+            messages, original_query, SYNBIO_RETRIEVAL
+        )
+    elif (app.state.config.QUERY_GENERATION_PROMPT_TEMPLATE).strip() != "":
         template = app.state.config.QUERY_GENERATION_PROMPT_TEMPLATE
     else:
         template = DEFAULT_QUERY_GENERATION_PROMPT_TEMPLATE
 
-    content = query_generation_template(
-        template, form_data["messages"], {"name": user.name}
-    )
+    content = query_generation_template(template, messages, {"name": user.name})
 
     payload = {
         "model": task_model_id,

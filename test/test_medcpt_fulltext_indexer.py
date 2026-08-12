@@ -6,10 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from scripts.medcpt_indexing.encoder import _raw_cls
 from scripts.medcpt_indexing.models import IndexDocument, IndexingConfig
-from scripts.medcpt_indexing.pipeline import run_indexing, validate_inputs
+from scripts.medcpt_indexing.pipeline import (
+    discover_shards,
+    run_indexing,
+    validate_inputs,
+)
 from scripts.medcpt_indexing.schema import (
-    embedding_text,
     load_pmid_mapping,
     make_index_document,
 )
@@ -265,3 +269,59 @@ def test_remote_operation_retries_transient_failure(monkeypatch):
 
     assert _with_retries(operation, label="test") == "ok"
     assert attempts == 3
+
+
+def test_raw_cls_is_not_l2_normalized():
+    class HiddenState:
+        def __getitem__(self, key):
+            assert key == (slice(None), 0, slice(None))
+            return self
+
+        def float(self):
+            return [3.0, 4.0]
+
+    assert _raw_cls(HiddenState()) == [3.0, 4.0]
+
+
+def test_vector_only_indexes_multiple_chunk_directories(tmp_path):
+    chunks_dir = tmp_path / "chunks"
+    recovered_dir = tmp_path / "recovered_chunks"
+    chunks_dir.mkdir()
+    recovered_dir.mkdir()
+    _write_shard(chunks_dir / "part-00000.jsonl", [_chunk("base", "PMC1")])
+    _write_shard(
+        recovered_dir / "part-recovered-00000.jsonl",
+        [_chunk("recovered", "PMC2", chunk_type="figure_caption")],
+    )
+    config = IndexingConfig(
+        chunks_dir=chunks_dir,
+        additional_chunks_dirs=(recovered_dir,),
+        mapping_db=_mapping_database(tmp_path / "mapping.sqlite3"),
+        state_file=tmp_path / "state.json",
+        vector_only=True,
+        encode_batch_size=1,
+        upload_batch_size=1,
+    )
+    vector_sink = FakeVectorSink()
+
+    manifest = run_indexing(config, FakeEncoder(), vector_sink, None)
+
+    assert manifest["configuration"]["distance"] == "dot"
+    assert manifest["configuration"]["vector_only"] is True
+    assert manifest["totals"]["chunks"] == 2
+    assert set(manifest["completed_shards"]) == {
+        "part-00000.jsonl",
+        "part-recovered-00000.jsonl",
+    }
+
+
+def test_discover_shards_rejects_duplicate_names(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _write_shard(first / "part-00000.jsonl", [])
+    _write_shard(second / "part-00000.jsonl", [])
+
+    with pytest.raises(ValueError, match="must be unique"):
+        discover_shards((first, second))

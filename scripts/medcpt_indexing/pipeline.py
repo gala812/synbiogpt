@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
-from datetime import datetime, timezone
 import hashlib
 import json
 import logging
-from pathlib import Path
 import time
+from collections import Counter
+from collections.abc import Iterable, Iterator, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .models import Encoder, IndexDocument, IndexingConfig, KeywordSink, VectorSink
@@ -17,10 +17,21 @@ log = logging.getLogger("medcpt_fulltext_indexer")
 MANIFEST_SCHEMA = "medcpt_fulltext_index_manifest_v1"
 
 
-def discover_shards(chunks_dir: Path, limit: int = 0) -> list[Path]:
-    shards = sorted(chunks_dir.glob("part-*.jsonl"))
+def discover_shards(chunks_dirs: Sequence[Path], limit: int = 0) -> list[Path]:
+    shards = [
+        shard
+        for chunks_dir in chunks_dirs
+        for shard in sorted(chunks_dir.glob("part-*.jsonl"))
+    ]
     if not shards:
-        raise FileNotFoundError(f"No part-*.jsonl files found in {chunks_dir}")
+        raise FileNotFoundError(
+            f"No part-*.jsonl files found in: {', '.join(map(str, chunks_dirs))}"
+        )
+    duplicate_names = [
+        name for name, count in Counter(path.name for path in shards).items() if count > 1
+    ]
+    if duplicate_names:
+        raise ValueError(f"Chunk shard names must be unique: {duplicate_names}")
     return shards[:limit] if limit > 0 else shards
 
 
@@ -49,7 +60,7 @@ def _iter_documents(
             try:
                 chunk = json.loads(line)
                 if not isinstance(chunk, dict):
-                    raise ValueError("line is not a JSON object")
+                    raise TypeError("line is not a JSON object")
                 yield make_index_document(
                     chunk,
                     pmid_by_pmcid=pmid_by_pmcid,
@@ -67,11 +78,16 @@ def _file_fingerprint(path: Path) -> dict[str, int]:
 
 def _config_signature(config: IndexingConfig, encoder: Encoder) -> dict[str, Any]:
     return {
-        "chunks_dir": str(config.chunks_dir.resolve()),
+        "chunks_dirs": [
+            str(path.resolve())
+            for path in (config.chunks_dir, *config.additional_chunks_dirs)
+        ],
         "mapping_db": str(config.mapping_db.resolve()),
         "mapping_db_fingerprint": _file_fingerprint(config.mapping_db),
         "collection_name": config.collection_name,
         "bm25_index_name": config.bm25_index_name,
+        "distance": "dot",
+        "vector_only": config.vector_only,
         "model_name": encoder.model_name,
         "dimension": encoder.dimension,
         "max_tokens": config.max_tokens,
@@ -81,7 +97,7 @@ def _config_signature(config: IndexingConfig, encoder: Encoder) -> dict[str, Any
 def _new_manifest(signature: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": MANIFEST_SCHEMA,
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "created_at_utc": datetime.now(UTC).isoformat(),
         "configuration": signature,
         "completed_shards": {},
         "totals": {"chunks": 0, "elapsed_seconds": 0.0},
@@ -121,12 +137,12 @@ def _flush(
     documents: list[IndexDocument],
     vectors: list[list[float]],
     vector_sink: VectorSink,
-    keyword_sink: KeywordSink,
+    keyword_sink: KeywordSink | None,
 ) -> int:
     if not documents:
         return 0
     vector_count = vector_sink.write(documents, vectors)
-    keyword_count = keyword_sink.write(documents)
+    keyword_count = keyword_sink.write(documents) if keyword_sink else len(documents)
     if vector_count != len(documents) or keyword_count != len(documents):
         raise RuntimeError(
             f"Sink count mismatch: input={len(documents)}, vector={vector_count}, "
@@ -143,7 +159,7 @@ def _process_shard(
     pmid_by_pmcid: dict[str, str],
     encoder: Encoder,
     vector_sink: VectorSink,
-    keyword_sink: KeywordSink,
+    keyword_sink: KeywordSink | None,
     config: IndexingConfig,
 ) -> tuple[int, float]:
     started = time.perf_counter()
@@ -172,7 +188,7 @@ def _process_shard(
 
     indexed += _flush(pending_documents, pending_vectors, vector_sink, keyword_sink)
     vector_count = vector_sink.count_shard(shard.name)
-    keyword_count = keyword_sink.count_shard(shard.name)
+    keyword_count = keyword_sink.count_shard(shard.name) if keyword_sink else indexed
     if vector_count != indexed or keyword_count != indexed:
         raise RuntimeError(
             f"Remote verification failed for {shard.name}: input={indexed}, "
@@ -185,25 +201,27 @@ def run_indexing(
     config: IndexingConfig,
     encoder: Encoder,
     vector_sink: VectorSink,
-    keyword_sink: KeywordSink,
+    keyword_sink: KeywordSink | None,
 ) -> dict[str, Any]:
     if config.encode_batch_size <= 0 or config.upload_batch_size <= 0:
         raise ValueError("Batch sizes must be positive")
     if config.upload_batch_size < config.encode_batch_size:
         raise ValueError("upload_batch_size must be at least encode_batch_size")
 
-    shards = discover_shards(config.chunks_dir, config.limit_shards)
+    chunks_dirs = (config.chunks_dir, *config.additional_chunks_dirs)
+    shards = discover_shards(chunks_dirs, config.limit_shards)
     pmid_by_pmcid = load_pmid_mapping(config.mapping_db)
     signature = _config_signature(config, encoder)
     manifest = _load_manifest(config.state_file, signature)
     vector_sink.ensure_ready(encoder.dimension)
-    keyword_sink.ensure_ready()
+    if keyword_sink:
+        keyword_sink.ensure_ready()
 
     for shard in shards:
         if _already_complete(manifest, shard):
             expected = manifest["completed_shards"][shard.name]["chunks"]
             vector_count = vector_sink.count_shard(shard.name)
-            keyword_count = keyword_sink.count_shard(shard.name)
+            keyword_count = keyword_sink.count_shard(shard.name) if keyword_sink else expected
             if vector_count == expected and keyword_count == expected:
                 log.info("skip completed shard=%s", shard.name)
                 continue
@@ -226,7 +244,7 @@ def run_indexing(
             "input": _file_fingerprint(shard),
             "chunks": count,
             "elapsed_seconds": round(elapsed, 6),
-            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "completed_at_utc": datetime.now(UTC).isoformat(),
         }
         totals = manifest["totals"]
         totals["chunks"] = sum(
@@ -250,7 +268,8 @@ def run_indexing(
 
 
 def validate_inputs(config: IndexingConfig) -> dict[str, Any]:
-    shards = discover_shards(config.chunks_dir, config.limit_shards)
+    chunks_dirs = (config.chunks_dir, *config.additional_chunks_dirs)
+    shards = discover_shards(chunks_dirs, config.limit_shards)
     pmid_by_pmcid = load_pmid_mapping(config.mapping_db)
     counts: Counter[str] = Counter()
     pmcids: set[str] = set()

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 import logging
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from .models import IndexDocument
-
 
 log = logging.getLogger("medcpt_fulltext_indexer")
 
@@ -59,22 +58,30 @@ class QdrantVectorSink:
     def ensure_ready(self, dimension: int) -> None:
         from qdrant_client import models
 
+        expected_distance = models.Distance.DOT
+
         if not self.client.collection_exists(self.collection_name):
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
                     size=dimension,
-                    distance=models.Distance.COSINE,
+                    distance=expected_distance,
                 ),
             )
         else:
             info = self.client.get_collection(self.collection_name)
             vectors = info.config.params.vectors
             existing_dimension = getattr(vectors, "size", None)
+            existing_distance = getattr(vectors, "distance", None)
             if existing_dimension != dimension:
                 raise RuntimeError(
                     f"Qdrant collection {self.collection_name!r} has dimension "
                     f"{existing_dimension}, expected {dimension}"
+                )
+            if existing_distance != expected_distance:
+                raise RuntimeError(
+                    f"Qdrant collection {self.collection_name!r} uses distance "
+                    f"{existing_distance}, expected {expected_distance}"
                 )
 
         for field in (
@@ -113,7 +120,7 @@ class QdrantVectorSink:
                 for document, vector in zip(document_batch, vector_batch, strict=True)
             ]
             _with_retries(
-                lambda: self.client.upsert(
+                lambda points=points: self.client.upsert(
                     collection_name=self.collection_name,
                     points=points,
                     wait=True,

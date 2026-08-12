@@ -10,6 +10,11 @@ from huggingface_hub import snapshot_download
 from langchain_core.documents import Document
 
 from open_webui.apps.retrieval.vector.connector import VECTOR_DB_CLIENT
+from open_webui.apps.retrieval.query_processor import ProcessedQuery
+from open_webui.apps.retrieval.synbio import RetrievalConfig, RetrievalPipeline
+from open_webui.apps.retrieval.synbio.pipeline import (
+    add_asset_urls,
+)
 from open_webui.utils.misc import get_last_user_message
 
 from open_webui.env import SRC_LOG_LEVELS
@@ -24,6 +29,12 @@ from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.retrievers import BaseRetriever
 
 from open_webui.apps.webui.models.knowledge import Knowledges
+
+
+def _embedding_function_for_collection(embedding_function, collection_name: str):
+    selector = getattr(embedding_function, "for_collection", None)
+    return selector(collection_name) if callable(selector) else embedding_function
+
 
 def _is_base_knowledge_base(kb) -> bool:
     meta = getattr(kb, "meta", None)
@@ -79,9 +90,12 @@ class VectorSearchRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
+        encoder = _embedding_function_for_collection(
+            self.embedding_function, self.collection_name
+        )
         result = VECTOR_DB_CLIENT.search(
             collection_name=self.collection_name,
-            vectors=[self.embedding_function(query)],
+            vectors=[encoder(query)],
             limit=self.top_k,
         )
 
@@ -119,34 +133,37 @@ def query_doc(
         raise e
 
 
-_HYBRID_BM25_TOP_K = max(1, int(os.getenv("RAG_HYBRID_BM25_TOP_K", "100")))
-_HYBRID_VECTOR_TOP_K = max(1, int(os.getenv("RAG_HYBRID_VECTOR_TOP_K", "100")))
-_HYBRID_RERANK_CANDIDATE_LIMIT = max(
-    1, int(os.getenv("RAG_HYBRID_RERANK_CANDIDATE_LIMIT", "100"))
-)
-_HYBRID_RRF_K = max(1, int(os.getenv("RAG_HYBRID_RRF_K", "60")))
-_PAPER_ASSET_BASE_URL = os.getenv("PAPER_ASSET_BASE_URL", "").rstrip("/")
+_RETRIEVAL_PIPELINE = RetrievalPipeline(RetrievalConfig.from_env())
+
+
+def prepare_retrieval_query(query: str):
+    """Protect exact entities before the first base-model call."""
+
+    return _RETRIEVAL_PIPELINE.prepare_query(query)
+
+
+def process_generated_retrieval_query(
+    query: str, model_output: str | dict
+) -> ProcessedQuery:
+    """Validate and normalize the structured output of query generation."""
+
+    return _RETRIEVAL_PIPELINE.process_generated_query(query, model_output)
+
+
+def process_retrieval_query(query: str | ProcessedQuery) -> ProcessedQuery:
+    """Expose one shared preprocessing route for Dense, BM25, and SPECTER2."""
+
+    return _RETRIEVAL_PIPELINE.process_query(query)
 
 
 def invalidate_collection_cache(collection_name: str) -> None:
     log.info("[CACHE] invalidate skipped collection=%s", collection_name)
 
 
-def _candidate_doc_id(metadata: dict, fallback: str = "") -> str:
-    return str(metadata.get("doc_id") or metadata.get("id") or fallback)
-
-
 def _add_image_urls(metadata: dict) -> dict:
     """Expose stable image URLs without leaking storage paths."""
 
-    keys = metadata.get("asset_keys") or []
-    if _PAPER_ASSET_BASE_URL and isinstance(keys, list):
-        metadata["image_urls"] = [
-            f"{_PAPER_ASSET_BASE_URL}/assets/{key}"
-            for key in keys
-            if isinstance(key, str) and len(key) == 64
-        ]
-    return metadata
+    return add_asset_urls(metadata, _RETRIEVAL_PIPELINE.config.asset_base_url)
 
 
 def _vector_result_to_documents(result) -> list[Document]:
@@ -183,56 +200,9 @@ def _bm25_results_to_documents(results: list[dict]) -> list[Document]:
     return docs
 
 
-def _merge_retrieval_candidates(
-    bm25_docs: list[Document],
-    vector_docs: list[Document],
-    limit: int,
-) -> list[Document]:
-    """Fuse lexical and dense ranks without comparing incomparable raw scores."""
-
-    candidates: dict[str, dict] = {}
-    for source, documents in (("bm25", bm25_docs), ("vector", vector_docs)):
-        for rank, doc in enumerate(documents, 1):
-            metadata = dict(doc.metadata or {})
-            doc_id = _candidate_doc_id(metadata)
-            key = doc_id or f"text:{doc.page_content[:200]}"
-            candidate = candidates.setdefault(
-                key,
-                {
-                    "page_content": doc.page_content,
-                    "metadata": metadata,
-                    "sources": set(),
-                    "score": 0.0,
-                    "best_rank": rank,
-                },
-            )
-            candidate["score"] += 1.0 / (_HYBRID_RRF_K + rank)
-            candidate["best_rank"] = min(candidate["best_rank"], rank)
-            candidate["sources"].add(source)
-            for field, value in metadata.items():
-                candidate["metadata"].setdefault(field, value)
-            candidate["metadata"][f"{source}_rank"] = rank
-
-    ranked = sorted(
-        candidates.items(),
-        key=lambda item: (-item[1]["score"], item[1]["best_rank"], item[0]),
-    )[:limit]
-    merged: list[Document] = []
-    for _, candidate in ranked:
-        metadata = _add_image_urls(candidate["metadata"])
-        sources = sorted(candidate["sources"])
-        metadata["retrieval_source"] = "hybrid" if len(sources) > 1 else sources[0]
-        metadata["retrieval_sources"] = sources
-        metadata["rrf_score"] = candidate["score"]
-        merged.append(
-            Document(page_content=candidate["page_content"], metadata=metadata)
-        )
-    return merged
-
-
 def _query_doc_with_opensearch_hybrid(
     collection_name: str,
-    query: str,
+    query: ProcessedQuery,
     embedding_function,
     k: int,
     reranking_function,
@@ -240,99 +210,94 @@ def _query_doc_with_opensearch_hybrid(
     vector_call_index: int = 1,
     vector_call_total: int = 1,
 ) -> dict:
-    bm25_docs: list[Document] = []
-    try:
+    def bm25_search(processed_query):
         from open_webui.apps.retrieval.search.opensearch_bm25 import search_bm25
 
-        tb0 = time.perf_counter()
         bm25_results = search_bm25(
             [collection_name],
-            query,
-            top_k=_HYBRID_BM25_TOP_K,
+            processed_query.bm25_query,
+            top_k=_RETRIEVAL_PIPELINE.config.bm25_top_k,
+            exact_terms=list(processed_query.exact_terms),
         )
         bm25_docs = _bm25_results_to_documents(bm25_results)
-        log.info(
-            "[PERF] rag.bm25_search duration=%.3fs hits=%d top_k=%d collection=%s",
-            time.perf_counter() - tb0,
-            len(bm25_docs),
-            _HYBRID_BM25_TOP_K,
-            collection_name,
+        for document in bm25_docs:
+            document.metadata.setdefault("collection_name", collection_name)
+        return _RETRIEVAL_PIPELINE.ranked_from_documents("bm25", bm25_docs)
+
+    def dense_search(processed_query):
+        query_encoder = _embedding_function_for_collection(
+            embedding_function, collection_name
         )
-    except Exception:
-        log.exception("[HYBRID] OpenSearch BM25 search failed collection=%s", collection_name)
+        encode_started = time.perf_counter()
+        query_embedding = query_encoder(processed_query.semantic_query)
+        log.info(
+            "[PERF] rag.query_embedding duration=%.3fs collection=%s vector_call=%d/%d",
+            time.perf_counter() - encode_started,
+            collection_name,
+            vector_call_index,
+            vector_call_total,
+        )
+        search_started = time.perf_counter()
+        vector_result = query_doc(
+            collection_name=collection_name,
+            query_embedding=query_embedding,
+            k=_RETRIEVAL_PIPELINE.config.vector_top_k,
+        )
+        vector_docs = _vector_result_to_documents(vector_result)
+        for document in vector_docs:
+            document.metadata.setdefault("collection_name", collection_name)
+        log.info(
+            "[PERF] rag.vector_db_search duration=%.3fs hits=%d top_k=%d collection=%s vector_call=%d/%d",
+            time.perf_counter() - search_started,
+            len(vector_docs),
+            _RETRIEVAL_PIPELINE.config.vector_top_k,
+            collection_name,
+            vector_call_index,
+            vector_call_total,
+        )
+        return _RETRIEVAL_PIPELINE.ranked_from_documents("dense", vector_docs)
 
-    tv_total0 = time.perf_counter()
-    te0 = time.perf_counter()
-    query_embedding = embedding_function(query)
-    log.info(
-        "[PERF] rag.query_embedding duration=%.3fs collection=%s vector_call=%d/%d",
-        time.perf_counter() - te0,
-        collection_name,
-        vector_call_index,
-        vector_call_total,
-    )
-
-    tv0 = time.perf_counter()
-    vector_result = query_doc(
+    run = _RETRIEVAL_PIPELINE.search_ranked(
+        query,
+        dense_search=dense_search,
+        bm25_search=bm25_search,
+        embedding_function=embedding_function,
+        reranking_function=reranking_function,
+        output_k=k,
+        relevance_threshold=r,
         collection_name=collection_name,
-        query_embedding=query_embedding,
-        k=_HYBRID_VECTOR_TOP_K,
+        tolerate_bm25_failure=True,
     )
-    vector_docs = _vector_result_to_documents(vector_result)
+    docs = run.reranked_documents
     log.info(
-        "[PERF] rag.vector_db_search duration=%.3fs hits=%d top_k=%d collection=%s vector_call=%d/%d",
-        time.perf_counter() - tv0,
-        len(vector_docs),
-        _HYBRID_VECTOR_TOP_K,
+        "[PERF] rag.bm25_search duration=%.3fs hits=%d top_k=%d collection=%s",
+        run.timings["bm25_search_seconds"],
+        len(run.bm25_candidates),
+        _RETRIEVAL_PIPELINE.config.bm25_top_k,
         collection_name,
-        vector_call_index,
-        vector_call_total,
     )
     log.info(
         "[PERF] rag.vector_search duration=%.3fs hits=%d top_k=%d collection=%s vector_call=%d/%d",
-        time.perf_counter() - tv_total0,
-        len(vector_docs),
-        _HYBRID_VECTOR_TOP_K,
+        run.timings["dense_search_seconds"],
+        len(run.dense_candidates),
+        _RETRIEVAL_PIPELINE.config.vector_top_k,
         collection_name,
         vector_call_index,
         vector_call_total,
     )
-
-    tm0 = time.perf_counter()
-    cands = _merge_retrieval_candidates(
-        bm25_docs,
-        vector_docs,
-        _HYBRID_RERANK_CANDIDATE_LIMIT,
-    )
     log.info(
         "[PERF] rag.merge_dedupe duration=%.3fs bm25_hits=%d vector_hits=%d merged=%d limit=%d collection=%s",
-        time.perf_counter() - tm0,
-        len(bm25_docs),
-        len(vector_docs),
-        len(cands),
-        _HYBRID_RERANK_CANDIDATE_LIMIT,
+        run.timings["fusion_seconds"],
+        len(run.bm25_candidates),
+        len(run.dense_candidates),
+        len(run.fused_candidates),
+        _RETRIEVAL_PIPELINE.config.candidate_limit,
         collection_name,
     )
-
-    if not cands:
-        return {
-            "distances": [[]],
-            "documents": [[]],
-            "metadatas": [[]],
-        }
-
-    compressor = RerankCompressor(
-        embedding_function=embedding_function,
-        top_n=k,
-        reranking_function=reranking_function,
-        r_score=r,
-    )
-    tr0 = time.perf_counter()
-    docs = compressor.compress_documents(cands, query)
     log.info(
         "[PERF] rag.reranker duration=%.3fs candidates=%d out=%d",
-        time.perf_counter() - tr0,
-        len(cands),
+        run.timings["rerank_seconds"],
+        len(run.fused_candidates),
         len(docs),
     )
 
@@ -345,7 +310,7 @@ def _query_doc_with_opensearch_hybrid(
 
 def query_doc_with_hybrid_search(
     collection_name: str,
-    query: str,
+    query: str | ProcessedQuery,
     embedding_function,
     k: int,
     reranking_function,
@@ -355,10 +320,11 @@ def query_doc_with_hybrid_search(
 ) -> dict:
     t0 = time.perf_counter()
     try:
+        processed_query = process_retrieval_query(query)
         result = _query_doc_with_opensearch_hybrid(
             collection_name=collection_name,
             embedding_function=embedding_function,
-            query=query,
+            query=processed_query,
             k=k,
             reranking_function=reranking_function,
             r=r,
@@ -425,22 +391,110 @@ def merge_and_sort_query_results(
     return result
 
 
+def _recover_fulltext_context(result: dict, collection_names: list[str]) -> dict:
+    collection_name = next(
+        (
+            name
+            for name in collection_names
+            if name in _RETRIEVAL_PIPELINE.config.fulltext_collections
+        ),
+        None,
+    )
+    if not _RETRIEVAL_PIPELINE.config.context_recovery_enabled or not collection_name:
+        return result
+
+    documents = result.get("documents", [[]])[0]
+    metadatas = result.get("metadatas", [[]])[0]
+    if not documents or len(documents) != len(metadatas):
+        return result
+
+    from open_webui.apps.retrieval.search.opensearch_bm25 import (
+        fetch_chunks_by_ids,
+    )
+
+    anchors = [
+        Document(page_content=text, metadata=dict(metadata or {}))
+        for text, metadata in zip(documents, metadatas, strict=True)
+    ]
+    started = time.perf_counter()
+    try:
+        expanded = _RETRIEVAL_PIPELINE.expand_evidence(
+            anchors,
+            lambda chunk_ids: fetch_chunks_by_ids(collection_name, list(chunk_ids)),
+            asset_enabled=False,
+        )
+        recovered = expanded.context
+        if recovered is None:
+            return result
+    except Exception:
+        log.exception(
+            "[CONTEXT] recovery failed; returning reranked anchors collection=%s",
+            collection_name,
+        )
+        return result
+
+    asset_documents = []
+    assets = None
+    if _RETRIEVAL_PIPELINE.config.asset_expansion_enabled:
+        asset_started = time.perf_counter()
+        assets = _RETRIEVAL_PIPELINE.expand_assets(recovered.documents)
+        asset_documents = assets.documents
+        for document in recovered.documents:
+            document.metadata.pop("image_urls", None)
+        log.info(
+            "[PERF] rag.asset_expansion duration=%.3fs candidates=%d groups=%d "
+            "images=%d duplicate_keys=%d image_limit_skipped=%d unresolved_urls=%d",
+            time.perf_counter() - asset_started,
+            assets.candidate_group_count,
+            assets.selected_group_count,
+            assets.selected_image_count,
+            assets.duplicate_key_count,
+            assets.image_limit_skipped_count,
+            assets.unresolved_url_count,
+        )
+
+    log.info(
+        "[PERF] rag.context_recovery duration=%.3fs anchors=%d expanded=%d "
+        "tokens=%d budget_skipped=%d missing=%d cross_document_rejections=%d",
+        time.perf_counter() - started,
+        recovered.anchor_count,
+        recovered.expanded_count,
+        recovered.token_count,
+        recovered.budget_skipped_count,
+        recovered.missing_count,
+        recovered.cross_document_rejection_count,
+    )
+    output_documents = [*recovered.documents, *asset_documents]
+    return {
+        "distances": [[doc.metadata.get("score") for doc in output_documents]],
+        "documents": [[doc.page_content for doc in output_documents]],
+        "metadatas": [[doc.metadata for doc in output_documents]],
+    }
+
+
 def query_collection(
     collection_names: list[str],
-    queries: list[str],
+    queries: list[str | ProcessedQuery],
     embedding_function,
     k: int,
 ) -> dict:
     results = []
     for query in queries:
-        query_embedding = embedding_function(query)
+        semantic_query = process_retrieval_query(query).semantic_query
+        embeddings_by_encoder = {}
         for collection_name in collection_names:
             if collection_name:
                 try:
+                    encoder = _embedding_function_for_collection(
+                        embedding_function, collection_name
+                    )
+                    encoder_key = id(encoder)
+                    if encoder_key not in embeddings_by_encoder:
+                        embeddings_by_encoder[encoder_key] = encoder(semantic_query)
                     result = query_doc(
                         collection_name=collection_name,
                         k=k,
-                        query_embedding=query_embedding,
+                        query_embedding=embeddings_by_encoder[encoder_key],
                     )
                     if result is not None:
                         results.append(result.model_dump())
@@ -451,10 +505,11 @@ def query_collection(
 
     return merge_and_sort_query_results(results, k=k)
 
+
 # Original query_collection_with_hybrid_search
 def query_collection_with_hybrid_search(
     collection_names: list[str],
-    queries: list[str],
+    queries: list[str | ProcessedQuery],
     embedding_function,
     k: int,
     reranking_function,
@@ -508,7 +563,8 @@ def query_collection_with_hybrid_search(
             "Hybrid search failed for all collections. Using Non hybrid search as fallback."
         )
 
-    return merge_and_sort_query_results(results, k=k, reverse=True)
+    merged = merge_and_sort_query_results(results, k=k, reverse=True)
+    return _recover_fulltext_context(merged, collection_names)
 
 
 def get_embedding_function(
@@ -845,72 +901,3 @@ def generate_embeddings(engine: str, model: str, text: Union[str, list[str]], **
             embeddings = generate_openai_batch_embeddings(model, [text], url, key)
 
         return embeddings[0] if isinstance(text, str) else embeddings
-
-
-import operator
-from typing import Optional, Sequence
-
-from langchain_core.callbacks import Callbacks
-from langchain_core.documents import BaseDocumentCompressor, Document
-
-
-def log_reranker_device(rerank):
-    dev = None
-    try:
-        dev = str(rerank.model.device)
-    except Exception:
-        pass
-    log.info("[DEBUG] reranker=%s device=%s", type(rerank), dev)
-
-class RerankCompressor(BaseDocumentCompressor):
-    embedding_function: Any
-    top_n: int
-    reranking_function: Any
-    r_score: float
-
-    class Config:
-        extra = "forbid"
-        arbitrary_types_allowed = True
-
-    def compress_documents(
-        self,
-        documents: Sequence[Document],
-        query: str,
-        callbacks: Optional[Callbacks] = None,
-    ) -> Sequence[Document]:
-        reranking = self.reranking_function is not None
-
-        if reranking and not getattr(self, "_reranker_device_logged", False):
-            setattr(self, "_reranker_device_logged", True)
-            log_reranker_device(self.reranking_function)
-
-        if reranking:
-            scores = self.reranking_function.predict(
-                [(query, doc.page_content) for doc in documents]
-            )
-        else:
-            from sentence_transformers import util
-
-            query_embedding = self.embedding_function(query)
-            document_embedding = self.embedding_function(
-                [doc.page_content for doc in documents]
-            )
-            scores = util.cos_sim(query_embedding, document_embedding)[0]
-
-        docs_with_scores = list(zip(documents, scores.tolist()))
-        if self.r_score:
-            docs_with_scores = [
-                (d, s) for d, s in docs_with_scores if s >= self.r_score
-            ]
-
-        result = sorted(docs_with_scores, key=operator.itemgetter(1), reverse=True)
-        final_results = []
-        for doc, doc_score in result[: self.top_n]:
-            metadata = doc.metadata
-            metadata["score"] = doc_score
-            doc = Document(
-                page_content=doc.page_content,
-                metadata=metadata,
-            )
-            final_results.append(doc)
-        return final_results

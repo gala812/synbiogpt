@@ -655,30 +655,18 @@ ENABLE_OPENAI_API = PersistentConfig(
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "").strip()
 
 
 if OPENAI_API_BASE_URL == "":
     OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 
-OPENAI_API_KEYS = os.environ.get("OPENAI_API_KEYS", "")
-OPENAI_API_KEYS = OPENAI_API_KEYS if OPENAI_API_KEYS != "" else OPENAI_API_KEY
-
-OPENAI_API_KEYS = [url.strip() for url in OPENAI_API_KEYS.split(";")]
 OPENAI_API_KEYS = PersistentConfig(
-    "OPENAI_API_KEYS", "openai.api_keys", OPENAI_API_KEYS
+    "OPENAI_API_KEYS", "openai.api_keys", [OPENAI_API_KEY]
 )
 
-OPENAI_API_BASE_URLS = os.environ.get("OPENAI_API_BASE_URLS", "")
-OPENAI_API_BASE_URLS = (
-    OPENAI_API_BASE_URLS if OPENAI_API_BASE_URLS != "" else OPENAI_API_BASE_URL
-)
-
-OPENAI_API_BASE_URLS = [
-    url.strip() if url != "" else "https://api.openai.com/v1"
-    for url in OPENAI_API_BASE_URLS.split(";")
-]
 OPENAI_API_BASE_URLS = PersistentConfig(
-    "OPENAI_API_BASE_URLS", "openai.api_base_urls", OPENAI_API_BASE_URLS
+    "OPENAI_API_BASE_URLS", "openai.api_base_urls", [OPENAI_API_BASE_URL.rstrip("/")]
 )
 
 OPENAI_API_CONFIGS = PersistentConfig(
@@ -686,16 +674,6 @@ OPENAI_API_CONFIGS = PersistentConfig(
     "openai.api_configs",
     {},
 )
-
-# Get the actual OpenAI API key based on the base URL
-OPENAI_API_KEY = ""
-try:
-    OPENAI_API_KEY = OPENAI_API_KEYS.value[
-        OPENAI_API_BASE_URLS.value.index("https://api.openai.com/v1")
-    ]
-except Exception:
-    pass
-OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 
 ####################################
 # WEBUI
@@ -1011,6 +989,38 @@ Analyze the chat history to determine the necessity of generating search queries
 Strictly return in JSON format: 
 {
   "queries": ["query1", "query2"]
+}
+
+### Chat History:
+<chat_history>
+{{MESSAGES:END:6}}
+</chat_history>
+"""
+
+DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE = """### Task:
+Convert the latest user question into one English scientific retrieval query and
+one concise English lexical query. Do not answer the question.
+
+### Rules:
+- Return EXCLUSIVELY one valid JSON object with the four fields shown below.
+- `semantic_query` must be a natural English research question suitable for
+  SPECTER2 and the MedCPT Query Encoder.
+- `lexical_query` must contain concise English keywords and high-confidence
+  synonyms suitable for BM25. Do not use Boolean query syntax.
+- If the question is already English, do not translate it; only improve its
+  retrieval wording when necessary.
+- Preserve every placeholder shaped like `ZXQENTITY<number>QXZ` exactly. These
+  placeholders represent genes, proteins, plasmids, strains, chemicals, or
+  experimental identifiers and must appear wherever the entity is relevant.
+- Do not add unsupported organisms, genes, mechanisms, or experimental facts.
+- Use only a small number of high-confidence synonym expansions.
+
+### Output:
+{
+  "original_query": "latest user question",
+  "semantic_query": "one English semantic retrieval question",
+  "lexical_query": "English scientific keywords and synonyms",
+  "exact_terms": ["identifiers copied exactly from the input"]
 }
 
 ### Chat History:

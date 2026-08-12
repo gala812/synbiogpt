@@ -12,6 +12,11 @@ SynBioGPT 是合成生物学问答平台，核心增强点是知识库检索链�
 - `src/`：前端（SvelteKit）
 - `backend/open_webui/`：后端（FastAPI）
 - `backend/data/`：本地数据目录（数据库、索引、上传内容等）
+- `backend/open_webui/apps/retrieval/synbio/`：SynBioGPT 正式在线检索编排与 WebUI 薄适配
+- `scripts/medcpt_fulltext/`：MinerU Markdown 全文处理与稳定切块
+- `scripts/medcpt_indexing/`：MedCPT/Qdrant/OpenSearch 生产索引管线
+- `scripts/medcpt_images/`：现有图表恢复、访问清单和索引补充流程
+- `scripts/query_medcpt_fulltext.py`：调用正式 RetrievalPipeline 的离线验证入口
 
 ## 环境要求
 - Node.js `>=18.13 <=22`
@@ -47,8 +52,9 @@ bash dev.sh
 - 走纯向量检索（原 RAG 检索路径）
 
 ### 开启 Hybrid
-- 同时走向量召回 + 词法一级检索
-- 合并候选后进行重排，再送入 RAG 生成
+- `Query Processor → MedCPT Dense + BM25 → RRF → Cross Encoder`
+- 命中后恢复 Parent/Previous/Next，并扩展 Figure/Table 证据
+- WebUI 与离线验证 CLI 共用同一 `RetrievalPipeline`
 
 后台可通过 `/retrieval/api/v1/query/settings` 与 `/retrieval/api/v1/query/settings/update` 查看和更新 `hybrid` 开关。
 
@@ -61,4 +67,3 @@ python -m pytest backend/open_webui/test/apps/retrieval/test_lexical_index.py ba
 ## 说明
 - `backend/data/` 是业务数据目录，删除前请先备份。
 - `node_modules/`、`.svelte-kit/`、`build/`、`__pycache__/` 都可按需清理并可再生成。
-

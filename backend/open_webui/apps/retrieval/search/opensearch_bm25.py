@@ -1,12 +1,21 @@
 import logging
 import os
-from typing import Any, Iterable, Optional
-
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
 
 log = logging.getLogger("synbiogpt.app.retrieval.search.opensearch_bm25")
 log.setLevel(os.getenv("RAG_LOG_LEVEL", os.getenv("GLOBAL_LOG_LEVEL", "INFO")).upper())
 
 DEFAULT_BM25_INDEX_NAME = "open_webui_bm25"
+DEFAULT_MEDCPT_BM25_INDEX_NAME = "fulltext_bm25_v1"
+DEFAULT_MEDCPT_COLLECTION_NAME = "fulltext_medcpt_ip_v1"
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievedChunk:
+    page_content: str
+    metadata: dict[str, Any]
 
 
 def _as_bool(value: Any) -> bool:
@@ -15,8 +24,25 @@ def _as_bool(value: Any) -> bool:
     return str(value).lower() in {"1", "true", "yes", "on"}
 
 
-def _get_index_name(index_name: Optional[str] = None) -> str:
+def _get_index_name(index_name: str | None = None) -> str:
     return index_name or os.getenv("OPENSEARCH_BM25_INDEX", DEFAULT_BM25_INDEX_NAME)
+
+
+def _get_search_index_name(
+    collection_names: list[str], index_name: str | None = None
+) -> str:
+    if index_name:
+        return index_name
+    medcpt_collections = {
+        name.strip()
+        for name in os.getenv(
+            "MEDCPT_QUERY_ENCODER_COLLECTIONS", DEFAULT_MEDCPT_COLLECTION_NAME
+        ).split(",")
+        if name.strip()
+    }
+    if any(name in medcpt_collections for name in collection_names):
+        return os.getenv("MEDCPT_BM25_INDEX", DEFAULT_MEDCPT_BM25_INDEX_NAME)
+    return _get_index_name()
 
 
 def _get_client():
@@ -40,7 +66,7 @@ def _get_client():
     )
 
 
-def ensure_bm25_index(index_name: Optional[str] = None) -> str:
+def ensure_bm25_index(index_name: str | None = None) -> str:
     index = _get_index_name(index_name)
     client = _get_client()
 
@@ -91,12 +117,19 @@ def _coerce_document(doc: Any) -> dict[str, Any]:
     if isinstance(doc, dict):
         text = doc.get("text") or doc.get("page_content") or ""
         metadata = dict(doc.get("metadata") or {})
-        doc_id = doc.get("doc_id") or doc.get("id") or metadata.get("doc_id") or metadata.get("id")
+        doc_id = (
+            doc.get("doc_id")
+            or doc.get("id")
+            or metadata.get("doc_id")
+            or metadata.get("id")
+        )
         collection_name = doc.get("collection_name") or metadata.get("collection_name")
         title = doc.get("title") or metadata.get("title")
         file_id = doc.get("file_id") or metadata.get("file_id")
         journal = doc.get("journal") or metadata.get("journal")
-        publication_date = doc.get("publication_date") or metadata.get("publication_date")
+        publication_date = doc.get("publication_date") or metadata.get(
+            "publication_date"
+        )
         source = doc.get("source") or metadata.get("source")
     else:
         text = getattr(doc, "page_content", "") or ""
@@ -142,7 +175,7 @@ def _document_storage_id(document: dict[str, Any]) -> str:
 
 def index_bm25_documents(
     docs: Iterable[Any],
-    index_name: Optional[str] = None,
+    index_name: str | None = None,
     refresh: bool = False,
 ) -> int:
     from opensearchpy.helpers import bulk
@@ -172,17 +205,47 @@ def search_bm25(
     collection_names: list[str],
     query: str,
     top_k: int = 100,
-    index_name: Optional[str] = None,
-    candidate_pmids: Optional[list[str]] = None,
+    index_name: str | None = None,
+    candidate_pmids: list[str] | None = None,
+    exact_terms: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if not collection_names:
         return []
 
-    index = _get_index_name(index_name)
+    index = _get_search_index_name(collection_names, index_name)
     client = _get_client()
     filters = [{"terms": {"collection_name": collection_names}}]
     if candidate_pmids:
         filters.append({"terms": {"pmid": [str(value) for value in candidate_pmids]}})
+
+    exact_terms = list(
+        dict.fromkeys(term.strip() for term in exact_terms or [] if term.strip())
+    )
+    bool_query: dict[str, Any] = {
+        "filter": filters,
+        "must": [
+            {
+                "multi_match": {
+                    "query": query,
+                    "fields": ["title^3", "section_text^1.5", "text"],
+                    "minimum_should_match": "30%",
+                }
+            }
+        ],
+    }
+    if exact_terms:
+        bool_query["should"] = [
+            {
+                "multi_match": {
+                    "query": term,
+                    "type": "phrase",
+                    "fields": ["title^6", "section_text^3", "text^4"],
+                    "boost": 4,
+                }
+            }
+            for term in exact_terms
+        ]
+        bool_query["minimum_should_match"] = 1
 
     body = {
         "size": top_k,
@@ -201,19 +264,7 @@ def search_bm25(
             "collection_name",
             "file_id",
         ],
-        "query": {
-            "bool": {
-                "filter": filters,
-                "must": [
-                    {
-                        "multi_match": {
-                            "query": query,
-                            "fields": ["title^3", "section_text^1.5", "text"],
-                        }
-                    }
-                ],
-            }
-        },
+        "query": {"bool": bool_query},
     }
     result = client.search(index=index, body=body)
 
@@ -221,7 +272,12 @@ def search_bm25(
     for hit in result.get("hits", {}).get("hits", []):
         source = hit.get("_source", {})
         metadata = dict(source.get("metadata") or {})
-        doc_id = source.get("doc_id") or metadata.get("doc_id") or metadata.get("id") or hit.get("_id")
+        doc_id = (
+            source.get("doc_id")
+            or metadata.get("doc_id")
+            or metadata.get("id")
+            or hit.get("_id")
+        )
         if doc_id is not None:
             metadata["id"] = str(doc_id)
             metadata["doc_id"] = str(doc_id)
@@ -242,3 +298,71 @@ def search_bm25(
         )
 
     return hits
+
+
+def fetch_chunks_by_ids(
+    collection_name: str,
+    chunk_ids: list[str],
+    index_name: str | None = None,
+) -> dict[str, Any]:
+    """Fetch chunk text and metadata in one OpenSearch request."""
+
+    unique_ids = list(
+        dict.fromkeys(str(value).strip() for value in chunk_ids if str(value).strip())
+    )
+    if not unique_ids:
+        return {}
+    index = _get_search_index_name([collection_name], index_name)
+    storage_ids = [f"{collection_name}:{chunk_id}" for chunk_id in unique_ids]
+    source_fields = [
+        "doc_id",
+        "text",
+        "metadata",
+        "title",
+        "pmid",
+        "pmcid",
+        "chunk_type",
+        "section",
+        "source_shard",
+        "collection_name",
+    ]
+    client = _get_client()
+    response = client.mget(
+        index=index,
+        body={"ids": storage_ids},
+        _source=source_fields,
+    )
+    documents: dict[str, RetrievedChunk] = {}
+
+    def add_source(source: dict[str, Any]) -> None:
+        chunk_id = str(source.get("doc_id") or "").strip()
+        if not chunk_id or chunk_id not in unique_ids:
+            return
+        metadata = dict(source.get("metadata") or {})
+        metadata["chunk_id"] = chunk_id
+        metadata["collection_name"] = source.get("collection_name") or collection_name
+        for field in ("pmid", "pmcid", "chunk_type", "section", "source_shard"):
+            if source.get(field) is not None:
+                metadata.setdefault(field, source[field])
+        documents[chunk_id] = RetrievedChunk(
+            page_content=str(source.get("text") or ""),
+            metadata=metadata,
+        )
+
+    for hit in response.get("docs", []):
+        if hit.get("found"):
+            add_source(hit.get("_source") or {})
+
+    missing_ids = [chunk_id for chunk_id in unique_ids if chunk_id not in documents]
+    if missing_ids:
+        fallback = client.search(
+            index=index,
+            body={
+                "size": len(missing_ids),
+                "_source": source_fields,
+                "query": {"terms": {"doc_id": missing_ids}},
+            },
+        )
+        for hit in fallback.get("hits", {}).get("hits", []):
+            add_source(hit.get("_source") or {})
+    return documents

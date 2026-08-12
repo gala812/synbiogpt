@@ -3,8 +3,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 
+def _raw_cls(last_hidden_state):
+    return last_hidden_state[:, 0, :].float()
+
+
 class MedCPTArticleEncoder:
-    """CLS-pooled, L2-normalized MedCPT Article Encoder."""
+    """MedCPT Article Encoder using the model's raw CLS representation."""
 
     def __init__(
         self,
@@ -71,6 +75,5 @@ class MedCPTArticleEncoder:
         )
         encoded = {key: value.to(self._device) for key, value in encoded.items()}
         with torch.inference_mode():
-            output = self.model(**encoded).last_hidden_state[:, 0, :]
-            output = torch.nn.functional.normalize(output.float(), p=2, dim=1)
+            output = _raw_cls(self.model(**encoded).last_hidden_state)
         return output.cpu().tolist()

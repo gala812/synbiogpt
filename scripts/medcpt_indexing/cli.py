@@ -23,9 +23,15 @@ def _bool(value: str) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Embed MedCPT full-text chunks and dual-write Qdrant/OpenSearch."
+        description="Embed MedCPT full-text chunks into Qdrant and optionally OpenSearch."
     )
-    parser.add_argument("--chunks-dir", required=True, type=Path)
+    parser.add_argument(
+        "--chunks-dir",
+        required=True,
+        type=Path,
+        action="append",
+        help="Chunk shard directory; repeat to index additional chunk sources.",
+    )
     parser.add_argument("--mapping-db", required=True, type=Path)
     parser.add_argument("--model", default=os.getenv("MEDCPT_ARTICLE_ENCODER"))
     parser.add_argument(
@@ -33,8 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Per-shard manifest; defaults beside the chunks directory.",
     )
-    parser.add_argument("--collection", default="fulltext_medcpt_v1")
+    parser.add_argument("--collection", default="fulltext_medcpt_ip_v1")
     parser.add_argument("--bm25-index", default="fulltext_bm25_v1")
+    parser.add_argument(
+        "--vector-only",
+        action="store_true",
+        help="Write only Qdrant; keep the existing BM25 index unchanged.",
+    )
     parser.add_argument("--encode-batch-size", type=int, default=128)
     parser.add_argument("--upload-batch-size", type=int, default=1024)
     parser.add_argument("--limit-shards", type=int, default=0)
@@ -87,14 +98,16 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     state_file = (
-        args.state_file or args.chunks_dir.parent / "medcpt_index_manifest.json"
+        args.state_file or args.chunks_dir[0].parent / "medcpt_ip_index_manifest.json"
     )
     config = IndexingConfig(
-        chunks_dir=args.chunks_dir,
+        chunks_dir=args.chunks_dir[0],
+        additional_chunks_dirs=tuple(args.chunks_dir[1:]),
         mapping_db=args.mapping_db,
         state_file=state_file,
         collection_name=args.collection,
         bm25_index_name=args.bm25_index,
+        vector_only=args.vector_only,
         encode_batch_size=args.encode_batch_size,
         upload_batch_size=args.upload_batch_size,
         max_tokens=args.max_tokens,
@@ -121,16 +134,18 @@ def main(argv: list[str] | None = None) -> int:
         api_key=args.qdrant_api_key,
         prefer_grpc=args.qdrant_prefer_grpc,
     )
-    keyword_sink = OpenSearchKeywordSink(
-        url=args.opensearch_url,
-        index_name=args.bm25_index,
-        collection_name=args.collection,
-        username=args.opensearch_username,
-        password=args.opensearch_password,
-        verify_certs=args.opensearch_verify_certs,
-        shards=args.opensearch_shards,
-        replicas=args.opensearch_replicas,
-    )
+    keyword_sink = None
+    if not args.vector_only:
+        keyword_sink = OpenSearchKeywordSink(
+            url=args.opensearch_url,
+            index_name=args.bm25_index,
+            collection_name=args.collection,
+            username=args.opensearch_username,
+            password=args.opensearch_password,
+            verify_certs=args.opensearch_verify_certs,
+            shards=args.opensearch_shards,
+            replicas=args.opensearch_replicas,
+        )
     manifest = run_indexing(config, encoder, vector_sink, keyword_sink)
     print(json.dumps(manifest["totals"], ensure_ascii=False, indent=2))
     return 0

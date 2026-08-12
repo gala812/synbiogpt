@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections import defaultdict
 import json
-from pathlib import Path
 import uuid
-from typing import Any, Iterable
+from collections import defaultdict
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
 
 try:
     from medcpt_fulltext.chunking import build_embedding_text, chunk_units, word_count
@@ -12,7 +13,11 @@ try:
     from medcpt_fulltext.tokenization import resolve_tokenizer
     from medcpt_indexing.schema import POINT_NAMESPACE
 except ModuleNotFoundError:  # Imported as scripts.medcpt_images from the repo root.
-    from scripts.medcpt_fulltext.chunking import build_embedding_text, chunk_units, word_count
+    from scripts.medcpt_fulltext.chunking import (
+        build_embedding_text,
+        chunk_units,
+        word_count,
+    )
     from scripts.medcpt_fulltext.models import ChunkingConfig, TextUnit
     from scripts.medcpt_fulltext.tokenization import resolve_tokenizer
     from scripts.medcpt_indexing.schema import POINT_NAMESPACE
@@ -235,20 +240,29 @@ def apply_payload_patches(
     patches_dir: Path,
     state_file: Path,
     qdrant_url: str,
-    opensearch_url: str,
-    collection_name: str = "fulltext_medcpt_v1",
+    opensearch_url: str | None,
+    collection_name: str = "fulltext_medcpt_ip_v1",
     index_name: str = "fulltext_bm25_v1",
     batch_size: int = 128,
+    vector_only: bool = False,
 ) -> dict[str, Any]:
-    from opensearchpy import OpenSearch
-    from opensearchpy.helpers import bulk
     from qdrant_client import QdrantClient, models
+
+    if not vector_only and not opensearch_url:
+        raise ValueError("opensearch_url is required unless vector_only is enabled")
+    opensearch = None
+    bulk = None
+    if not vector_only:
+        from opensearchpy import OpenSearch
+        from opensearchpy.helpers import bulk as opensearch_bulk
+
+        opensearch = OpenSearch(hosts=[opensearch_url], timeout=120)
+        bulk = opensearch_bulk
 
     state = {"schema_version": "medcpt_image_payload_patch_v1", "completed": {}}
     if state_file.exists():
         state = json.loads(state_file.read_text(encoding="utf-8"))
     qdrant = QdrantClient(url=qdrant_url, timeout=120)
-    opensearch = OpenSearch(hosts=[opensearch_url], timeout=120)
     patched = 0
 
     def flush(rows: list[dict[str, Any]]) -> None:
@@ -274,6 +288,8 @@ def apply_payload_patches(
                 wait=True,
             )
         )
+        if not opensearch or not bulk:
+            return
         actions = [
             {
                 "_op_type": "update",
@@ -332,5 +348,6 @@ def apply_payload_patches(
             encoding="utf-8",
         )
         temporary.replace(state_file)
-    opensearch.indices.refresh(index=index_name)
+    if opensearch:
+        opensearch.indices.refresh(index=index_name)
     return {"patched_records": patched, "completed_shards": len(state["completed"])}

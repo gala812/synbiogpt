@@ -1,14 +1,15 @@
-# MedCPT + BM25 全文索引
+# MedCPT 全文 Dense 索引
 
-该程序流式读取 `chunks/part-*.jsonl`，使用 MedCPT Article Encoder 生成768维向量并写入Qdrant，同时把同一批子块写入OpenSearch BM25。两个索引都以稳定的 `chunk_id` 为共同主键，并完整保留父块、章节及图表元数据。
+该程序流式读取一个或多个 `part-*.jsonl` 目录，使用 MedCPT Article Encoder 的原始 CLS 生成768维向量并写入Qdrant。正式重建使用 `--vector-only`，保留已有OpenSearch BM25索引。
 
 ## 固定方案
 
-- Qdrant集合：`fulltext_medcpt_v1`，768维Cosine。
+- Qdrant集合：`fulltext_medcpt_ip_v1`，768维Dot。
+- Article Encoder和Query Encoder都使用原始CLS，不做L2归一化。
 - OpenSearch索引：`fulltext_bm25_v1`。
 - Embedding输入：`Title + Section/Subsection + Text`，运行时临时拼接。
 - PMID必须来自官方映射SQLite中的 `paper_id_mapping` 表；程序同时校验 `index_metadata`、NCBI来源和快照SHA，缺失或冲突立即失败。
-- 仅索引 `chunks/`；`parents/` 用于召回后的上下文扩展，`figures_tables/` 用于图片详情查询，不重复向量化。
+- 同时索引基础 `chunks/` 和 `image_index_integration_v1/recovered_chunks/`；`parents/` 用于召回后的上下文扩展。
 - Figure/Table caption已经是chunk，`image_paths`、`figure_ids` 和 `table_ids` 会进入两个索引。
 
 ## 186服务器准备
@@ -53,7 +54,7 @@ python scripts/index_medcpt_fulltext.py \
 
 ## 继续全量
 
-使用相同参数删除 `--limit-shards 1` 即可。`medcpt_index_manifest.json` 只在Qdrant和OpenSearch均写入并校验成功后标记分片完成；中断后重跑会跳过已完成分片，未完成分片通过稳定ID安全覆盖。
+使用相同参数删除 `--limit-shards 1` 即可。`medcpt_ip_index_manifest.json` 只在Qdrant写入并校验成功后标记分片完成；中断后重跑会跳过已完成分片，未完成分片通过稳定ID安全覆盖。
 
 ```bash
 python scripts/index_medcpt_fulltext.py \

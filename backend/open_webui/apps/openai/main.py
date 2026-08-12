@@ -18,6 +18,7 @@ from open_webui.config import (
     OPENAI_API_BASE_URLS,
     OPENAI_API_KEYS,
     OPENAI_API_CONFIGS,
+    OPENAI_MODEL,
     AppConfig,
 )
 from open_webui.env import (
@@ -273,6 +274,22 @@ async def get_all_models_responses() -> list:
 
     tasks = []
     for idx, url in enumerate(app.state.config.OPENAI_API_BASE_URLS):
+        if OPENAI_MODEL and idx == 0:
+            model_list = {
+                "object": "list",
+                "data": [
+                    {
+                        "id": OPENAI_MODEL,
+                        "name": OPENAI_MODEL,
+                        "owned_by": "openai",
+                        "openai": {"id": OPENAI_MODEL},
+                        "urlIdx": idx,
+                    }
+                ],
+            }
+            tasks.append(asyncio.ensure_future(asyncio.sleep(0, model_list)))
+            continue
+
         if url not in app.state.config.OPENAI_API_CONFIGS:
             tasks.append(
                 aiohttp_get(f"{url}/models", app.state.config.OPENAI_API_KEYS[idx])

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Protocol
 
 
 @dataclass(slots=True)
@@ -19,8 +20,10 @@ class IndexingConfig:
     chunks_dir: Path
     mapping_db: Path
     state_file: Path
-    collection_name: str = "fulltext_medcpt_v1"
+    additional_chunks_dirs: tuple[Path, ...] = ()
+    collection_name: str = "fulltext_medcpt_ip_v1"
     bm25_index_name: str = "fulltext_bm25_v1"
+    vector_only: bool = False
     encode_batch_size: int = 128
     upload_batch_size: int = 1024
     max_tokens: int = 448

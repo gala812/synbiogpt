@@ -21,6 +21,12 @@ from open_webui.storage.provider import Storage
 from open_webui.apps.webui.models.knowledge import Knowledges
 from open_webui.apps.webui.models.users import Users
 from open_webui.apps.retrieval.vector.connector import VECTOR_DB_CLIENT
+from open_webui.apps.retrieval.models.medcpt import (
+    CollectionEmbeddingRouter,
+    CollectionRerankerRouter,
+    MedCPTCrossEncoder,
+    MedCPTQueryEncoder,
+)
 
 # Document loaders
 from open_webui.apps.retrieval.loaders.main import Loader
@@ -277,21 +283,111 @@ update_reranking_model(
 )
 
 
-app.state.EMBEDDING_FUNCTION = get_embedding_function(
-    app.state.config.RAG_EMBEDDING_ENGINE,
-    app.state.config.RAG_EMBEDDING_MODEL,
-    app.state.sentence_transformer_ef,
-    (
-        app.state.config.OPENAI_API_BASE_URL
-        if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-        else app.state.config.OLLAMA_BASE_URL
-    ),
-    (
-        app.state.config.OPENAI_API_KEY
-        if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-        else app.state.config.OLLAMA_API_KEY
-    ),
-    app.state.config.RAG_EMBEDDING_BATCH_SIZE,
+def _medcpt_query_collections() -> set[str]:
+    return {
+        name.strip()
+        for name in os.getenv(
+            "MEDCPT_QUERY_ENCODER_COLLECTIONS", "fulltext_medcpt_ip_v1"
+        ).split(",")
+        if name.strip()
+    }
+
+
+def _load_medcpt_query_encoder():
+    model_name = os.getenv("MEDCPT_QUERY_ENCODER_MODEL", "").strip()
+    if not model_name:
+        return None
+
+    encoder = MedCPTQueryEncoder(
+        model_name,
+        device=os.getenv("MEDCPT_QUERY_ENCODER_DEVICE", DEVICE_TYPE),
+        dtype=os.getenv("MEDCPT_QUERY_ENCODER_DTYPE", "auto"),
+        max_tokens=int(os.getenv("MEDCPT_QUERY_ENCODER_MAX_TOKENS", "64")),
+        local_files_only=os.getenv(
+            "MEDCPT_QUERY_ENCODER_LOCAL_FILES_ONLY", "true"
+        ).lower()
+        in {"1", "true", "yes", "on"},
+    )
+    log.info(
+        "Loaded MedCPT Query Encoder model=%s device=%s dimension=%d",
+        model_name,
+        os.getenv("MEDCPT_QUERY_ENCODER_DEVICE", DEVICE_TYPE),
+        encoder.dimension,
+    )
+    return encoder
+
+
+def _load_medcpt_cross_encoder():
+    model_name = os.getenv("MEDCPT_CROSS_ENCODER_MODEL", "").strip()
+    if not model_name:
+        return None
+
+    encoder = MedCPTCrossEncoder(
+        model_name,
+        device=os.getenv("MEDCPT_CROSS_ENCODER_DEVICE", DEVICE_TYPE),
+        dtype=os.getenv("MEDCPT_CROSS_ENCODER_DTYPE", "auto"),
+        max_tokens=int(os.getenv("MEDCPT_CROSS_ENCODER_MAX_TOKENS", "512")),
+        batch_size=int(os.getenv("MEDCPT_CROSS_ENCODER_BATCH_SIZE", "32")),
+        local_files_only=os.getenv(
+            "MEDCPT_CROSS_ENCODER_LOCAL_FILES_ONLY", "true"
+        ).lower()
+        in {"1", "true", "yes", "on"},
+    )
+    log.info(
+        "Loaded MedCPT Cross Encoder model=%s device=%s",
+        model_name,
+        os.getenv("MEDCPT_CROSS_ENCODER_DEVICE", DEVICE_TYPE),
+    )
+    return encoder
+
+
+def _build_embedding_function():
+    default = get_embedding_function(
+        app.state.config.RAG_EMBEDDING_ENGINE,
+        app.state.config.RAG_EMBEDDING_MODEL,
+        app.state.sentence_transformer_ef,
+        (
+            app.state.config.OPENAI_API_BASE_URL
+            if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
+            else app.state.config.OLLAMA_BASE_URL
+        ),
+        (
+            app.state.config.OPENAI_API_KEY
+            if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
+            else app.state.config.OLLAMA_API_KEY
+        ),
+        app.state.config.RAG_EMBEDDING_BATCH_SIZE,
+    )
+    encoder = app.state.medcpt_query_encoder
+    if encoder is None:
+        return default
+
+    collection_names = _medcpt_query_collections()
+    if not collection_names:
+        raise RuntimeError("MEDCPT_QUERY_ENCODER_COLLECTIONS cannot be empty")
+    return CollectionEmbeddingRouter(
+        default,
+        {name: encoder.encode for name in collection_names},
+    )
+
+
+def _build_reranking_function(default):
+    if isinstance(default, CollectionRerankerRouter):
+        default = default.default
+    encoder = app.state.medcpt_cross_encoder
+    if encoder is None:
+        return default
+    return CollectionRerankerRouter(
+        default,
+        {name: encoder for name in _medcpt_query_collections()},
+    )
+
+
+app.state.medcpt_query_encoder = _load_medcpt_query_encoder()
+app.state.EMBEDDING_FUNCTION = _build_embedding_function()
+app.state.medcpt_cross_encoder = _load_medcpt_cross_encoder()
+app.state.sentence_transformer_rf = _build_reranking_function(
+    app.state.sentence_transformer_rf
 )
 
 app.add_middleware(
@@ -367,6 +463,7 @@ async def get_status():
 
 @app.get("/embedding")
 async def get_embedding_config(user=Depends(get_admin_user)):
+    medcpt_encoder = app.state.medcpt_query_encoder
     return {
         "status": True,
         "embedding_engine": app.state.config.RAG_EMBEDDING_ENGINE,
@@ -379,6 +476,12 @@ async def get_embedding_config(user=Depends(get_admin_user)):
         "ollama_config": {
             "url": app.state.config.OLLAMA_BASE_URL,
             "key": app.state.config.OLLAMA_API_KEY,
+        },
+        "medcpt_query_encoder": {
+            "enabled": medcpt_encoder is not None,
+            "model": medcpt_encoder.model_name if medcpt_encoder else None,
+            "dimension": medcpt_encoder.dimension if medcpt_encoder else None,
+            "collections": sorted(_medcpt_query_collections()),
         },
     }
 
@@ -433,22 +536,7 @@ async def update_embedding_config(
 
         update_embedding_model(app.state.config.RAG_EMBEDDING_MODEL)
 
-        app.state.EMBEDDING_FUNCTION = get_embedding_function(
-            app.state.config.RAG_EMBEDDING_ENGINE,
-            app.state.config.RAG_EMBEDDING_MODEL,
-            app.state.sentence_transformer_ef,
-            (
-                app.state.config.OPENAI_API_BASE_URL
-                if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-                else app.state.config.OLLAMA_BASE_URL
-            ),
-            (
-                app.state.config.OPENAI_API_KEY
-                if app.state.config.RAG_EMBEDDING_ENGINE == "openai"
-                else app.state.config.OLLAMA_API_KEY
-            ),
-            app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-        )
+        app.state.EMBEDDING_FUNCTION = _build_embedding_function()
 
         return {
             "status": True,
@@ -487,6 +575,9 @@ async def update_reranking_config(
         app.state.config.RAG_RERANKING_MODEL = form_data.reranking_model
 
         update_reranking_model(app.state.config.RAG_RERANKING_MODEL, True)
+        app.state.sentence_transformer_rf = _build_reranking_function(
+            app.state.sentence_transformer_rf
+        )
 
         return {
             "status": True,
