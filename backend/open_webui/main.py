@@ -50,6 +50,11 @@ from open_webui.apps.openai.main import (
 )
 from open_webui.apps.retrieval.main import app as retrieval_app
 from open_webui.apps.retrieval.synbio import RetrievalPipeline
+from open_webui.apps.retrieval.synbio.citations import (
+    build_citation_sources,
+    resolve_citation_key,
+    resolve_citation_title,
+)
 from open_webui.apps.retrieval.synbio.hooks import (
     prepare_multimodal_messages,
     protect_query_messages,
@@ -387,61 +392,6 @@ def get_task_model_id(
     return task_model_id
 
 
-def resolve_citation_title(metadata: dict, source_item: dict) -> str:
-    source_name = (source_item.get("source") or {}).get("name")
-    return (
-        metadata.get("title")
-        or metadata.get("name")
-        or source_name
-        or metadata.get("source")
-        or "Unknown source"
-    )
-
-
-def build_citation_sources(results: list[dict]) -> list[dict]:
-    seen_titles: set[str] = set()
-    citation_sources: list[dict] = []
-
-    for item in results or []:
-        documents = item.get("document") or []
-        metadata_list = item.get("metadata") or []
-        distances = item.get("distances") or []
-
-        if not isinstance(documents, list):
-            continue
-
-        for doc_idx, _ in enumerate(documents):
-            metadata = {}
-            if (
-                isinstance(metadata_list, list)
-                and doc_idx < len(metadata_list)
-                and isinstance(metadata_list[doc_idx], dict)
-            ):
-                metadata = metadata_list[doc_idx]
-
-            title = resolve_citation_title(metadata, item)
-            if title in seen_titles:
-                continue
-            seen_titles.add(title)
-
-            score = metadata.get("score")
-            if score is None and isinstance(distances, list) and doc_idx < len(distances):
-                score = distances[doc_idx]
-
-            citation_sources.append(
-                {
-                    "citation_index": len(citation_sources) + 1,
-                    "title": title,
-                    "source": metadata.get("source")
-                    or (item.get("source") or {}).get("name"),
-                    "score": score,
-                    "metadata": metadata,
-                }
-            )
-
-    return citation_sources
-
-
 async def chat_completion_tools_handler(
     body: dict, user: UserModel, models, extra_params: dict
 ) -> tuple[dict, dict]:
@@ -613,9 +563,13 @@ async def chat_completion_files_handler(
                 time.perf_counter() - tq0,
             )
             generated = queries_response["choices"][0]["message"]["content"]
-            queries = [
-                SYNBIO_RETRIEVAL.process_generated_query(original_query, generated)
-            ]
+            processed_query = SYNBIO_RETRIEVAL.process_generated_query(
+                original_query, generated
+            )
+            if not processed_query.retrieval_required:
+                log.info("[PERF] rag.route route=chat sources=0")
+                return body, {"sources": []}
+            queries = [processed_query]
         except Exception:
             log.info(
                 "[PERF] rag.query_rewrite duration=%.3fs status=failed",
@@ -792,8 +746,8 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
             log.exception(e)
 
         citation_sources = build_citation_sources(sources)
-        citation_index_by_title = {
-            item["title"]: item["citation_index"] for item in citation_sources
+        citation_index_by_key = {
+            item["citation_key"]: item["citation_index"] for item in citation_sources
         }
 
         # If context is not empty, insert it into the messages
@@ -815,8 +769,8 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                             else:
                                 doc_metadata = {}
 
-                        citation_title = resolve_citation_title(doc_metadata, source)
-                        citation_index = citation_index_by_title.get(citation_title)
+                        citation_key = resolve_citation_key(doc_metadata, source)
+                        citation_index = citation_index_by_key.get(citation_key)
                         normalized_source_id = (
                             str(citation_index)
                             if citation_index is not None

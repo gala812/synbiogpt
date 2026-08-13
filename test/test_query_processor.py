@@ -118,3 +118,27 @@ def test_json_is_extracted_from_qwen_reasoning_wrapper():
 
     assert result.semantic_query == "How can succinate production be improved?"
     assert "succinic acid" in result.lexical_query
+
+
+def test_model_can_route_conversation_without_fabricating_a_query():
+    result = QueryProcessor().process_model_output(
+        "你好", {"route": "chat", "semantic_query": "", "lexical_query": ""}
+    )
+
+    assert result.retrieval_required is False
+    assert result.semantic_query == ""
+    assert result.lexical_query == ""
+
+
+def test_scientific_route_still_requires_a_valid_query():
+    result = QueryProcessor().process_model_output(
+        "如何提高丁二酸产量？",
+        {
+            "route": "retrieve",
+            "semantic_query": "How can succinate production be improved?",
+            "lexical_query": "succinate production yield",
+        },
+    )
+
+    assert result.retrieval_required is True
+    assert result.semantic_query == "How can succinate production be improved?"

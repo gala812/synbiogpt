@@ -998,11 +998,21 @@ Strictly return in JSON format:
 """
 
 DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE = """### Task:
-Convert the latest user question into one English scientific retrieval query and
-one concise English lexical query. Do not answer the question.
+Route the latest user message and, when literature evidence is needed, convert it
+into one English scientific retrieval query and one concise English lexical query.
+Do not answer the user.
 
 ### Rules:
-- Return EXCLUSIVELY one valid JSON object with the four fields shown below.
+- Return EXCLUSIVELY one valid JSON object with the five fields shown below.
+- Set `route` to `retrieve` when the user asks for scientific facts, evidence,
+  mechanisms, methods, comparisons, data, literature-grounded recommendations,
+  or a follow-up that requires such evidence.
+- Set `route` to `chat` for greetings, thanks, casual conversation, UI/help
+  requests, or other messages that do not need literature evidence.
+- Use the recent chat history to resolve short follow-ups such as "What about its
+  limitations?". When uncertain in a scientific conversation, prefer `retrieve`.
+- For `chat`, return empty strings for both query fields and an empty exact-term
+  list.
 - `semantic_query` must be a natural English research question suitable for
   SPECTER2 and the MedCPT Query Encoder.
 - `lexical_query` must contain concise English keywords and high-confidence
@@ -1017,6 +1027,7 @@ one concise English lexical query. Do not answer the question.
 
 ### Output:
 {
+  "route": "retrieve or chat",
   "original_query": "latest user question",
   "semantic_query": "one English semantic retrieval question",
   "lexical_query": "English scientific keywords and synonyms",
