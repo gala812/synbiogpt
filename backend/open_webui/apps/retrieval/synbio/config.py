@@ -14,6 +14,8 @@ def _enabled(name: str, default: str) -> bool:
 class RetrievalConfig:
     """One immutable snapshot of the current retrieval environment."""
 
+    default_knowledge_enabled: bool = True
+    default_collection: str = "fulltext_medcpt_ip_v1"
     bm25_top_k: int = 100
     vector_top_k: int = 100
     candidate_limit: int = 150
@@ -40,6 +42,12 @@ class RetrievalConfig:
             if name.strip()
         )
         return cls(
+            default_knowledge_enabled=_enabled(
+                "SYNBIO_DEFAULT_KNOWLEDGE_ENABLED", "true"
+            ),
+            default_collection=os.getenv(
+                "SYNBIO_DEFAULT_COLLECTION", "fulltext_medcpt_ip_v1"
+            ).strip(),
             bm25_top_k=max(1, int(os.getenv("RAG_HYBRID_BM25_TOP_K", "100"))),
             vector_top_k=max(1, int(os.getenv("RAG_HYBRID_VECTOR_TOP_K", "100"))),
             candidate_limit=max(

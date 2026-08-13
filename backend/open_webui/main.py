@@ -54,6 +54,7 @@ from open_webui.apps.retrieval.synbio.hooks import (
     prepare_multimodal_messages,
     protect_query_messages,
 )
+from open_webui.apps.retrieval.synbio.routing import add_default_knowledge
 from open_webui.apps.retrieval.utils import get_sources_from_files
 
 
@@ -588,7 +589,14 @@ async def chat_completion_files_handler(
 ) -> tuple[dict, dict[str, list]]:
     sources = []
 
-    if files := body.get("metadata", {}).get("files", None):
+    metadata = body.get("metadata", {})
+    files = add_default_knowledge(
+        metadata.get("files"),
+        metadata,
+        enabled=SYNBIO_RETRIEVAL.config.default_knowledge_enabled,
+        collection=SYNBIO_RETRIEVAL.config.default_collection,
+    )
+    if files:
         original_query = get_last_user_message(body["messages"])
         try:
             tq0 = time.perf_counter()
@@ -721,12 +729,14 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                         content={"detail": "User does not have access to the model"},
                     )
 
+        request_metadata = body.get("metadata") or {}
         metadata = {
             "chat_id": body.pop("chat_id", None),
             "message_id": body.pop("id", None),
             "session_id": body.pop("session_id", None),
             "tool_ids": body.get("tool_ids", None),
             "files": body.get("files", None),
+            "task": request_metadata.get("task"),
         }
         body["metadata"] = metadata
 
