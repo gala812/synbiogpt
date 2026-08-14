@@ -7,6 +7,8 @@ type TextStreamUpdate = {
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	sources?: any;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	files?: any;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	selectedModelId?: any;
 	error?: any;
 	usage?: ResponseUsage;
@@ -72,6 +74,11 @@ async function* openAIStreamToIterator(
 				continue;
 			}
 
+			if (parsedData.files) {
+				yield { done: false, value: '', files: parsedData.files };
+				continue;
+			}
+
 			if (parsedData.selected_model_id) {
 				yield { done: false, value: '', selectedModelId: parsedData.selected_model_id };
 				continue;
@@ -98,7 +105,7 @@ async function* streamLargeDeltasAsRandomChunks(
 			yield textStreamUpdate;
 			return;
 		}
-		if (textStreamUpdate.sources) {
+		if (textStreamUpdate.sources || textStreamUpdate.files) {
 			yield textStreamUpdate;
 			continue;
 		}

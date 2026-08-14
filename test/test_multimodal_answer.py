@@ -24,6 +24,15 @@ def test_collects_deduplicated_retrieval_images_with_limit():
     ]
 
 
+def test_builds_assistant_image_files():
+    assert MODULE.build_retrieval_image_files(
+        ["http://assets/a", "  ", "http://assets/b"]
+    ) == [
+        {"type": "image", "url": "http://assets/a"},
+        {"type": "image", "url": "http://assets/b"},
+    ]
+
+
 def test_converts_string_content_and_preserves_original_chinese_query():
     messages = [{"role": "user", "content": "大肠杆菌中 ldhA 有什么作用？"}]
 

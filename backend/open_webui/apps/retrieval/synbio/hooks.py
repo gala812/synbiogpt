@@ -37,7 +37,7 @@ def prepare_multimodal_messages(
     *,
     max_images: int,
     add_system_message: Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]],
-) -> tuple[list[dict[str, Any]], int, int]:
+) -> tuple[list[dict[str, Any]], list[str], int]:
     """Add the established Chinese-answer prompt and retrieved image evidence."""
 
     prepared = add_system_message(CHINESE_EVIDENCE_SYSTEM_PROMPT, messages)
@@ -45,4 +45,4 @@ def prepare_multimodal_messages(
     injected = inject_images_into_last_user_message(
         prepared, image_urls, max_images=max_images
     )
-    return prepared, len(image_urls), injected
+    return prepared, image_urls, injected

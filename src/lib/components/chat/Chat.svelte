@@ -1189,14 +1189,14 @@
 						return {
 							id: item.collection_name,
 							name: item.name,
-							legacy: true,
+							legacy: true
 						};
 					} else if (item?.collection_names) {
 						return {
 							name: item.name,
 							type: 'collection',
 							collection_names: item.collection_names,
-							legacy: true,
+							legacy: true
 						};
 					} else {
 						return item;
@@ -1333,6 +1333,11 @@
 									if ((model?.info?.meta?.knowledge ?? false) && !responseMessage.content?.trim()) {
 										setThinkingStatus(responseMessage);
 									}
+									continue;
+								}
+
+								if ('files' in data) {
+									responseMessage.files = data.files;
 									continue;
 								}
 
@@ -1534,14 +1539,14 @@
 						return {
 							id: item.collection_name,
 							name: item.name,
-							legacy: true,
+							legacy: true
 						};
 					} else if (item?.collection_names) {
 						return {
 							name: item.name,
 							type: 'collection',
 							collection_names: item.collection_names,
-							legacy: true,
+							legacy: true
 						};
 					} else {
 						return item;
@@ -1676,7 +1681,7 @@
 					const textStream = await createOpenAITextStream(res.body, $settings.splitLargeChunks);
 
 					for await (const update of textStream) {
-						const { value, done, sources, selectedModelId, error, usage } = update;
+						const { value, done, sources, files, selectedModelId, error, usage } = update;
 						if (error) {
 							await handleOpenAIError(error, null, model, responseMessage);
 							break;
@@ -1709,6 +1714,11 @@
 							if ((model?.info?.meta?.knowledge ?? false) && !responseMessage.content?.trim()) {
 								setThinkingStatus(responseMessage);
 							}
+							continue;
+						}
+
+						if (files) {
+							responseMessage.files = files;
 							continue;
 						}
 

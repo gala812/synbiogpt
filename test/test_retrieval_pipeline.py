@@ -171,7 +171,7 @@ def test_webui_hooks_preserve_query_and_multimodal_message_shapes():
     assert messages == [{"role": "user", "content": "ldhA deletion"}]
     assert protected[0]["content"] == "ZXQENTITY0QXZ deletion"
 
-    prepared, found, injected = HOOKS.prepare_multimodal_messages(
+    prepared, image_urls, injected = HOOKS.prepare_multimodal_messages(
         messages,
         [{"metadata": [{"image_urls": ["http://assets/a"]}]}],
         max_images=1,
@@ -180,7 +180,8 @@ def test_webui_hooks_preserve_query_and_multimodal_message_shapes():
             *values,
         ],
     )
-    assert found == injected == 1
+    assert image_urls == ["http://assets/a"]
+    assert injected == 1
     assert prepared[-1]["content"][-1] == {
         "type": "image_url",
         "image_url": {"url": "http://assets/a"},

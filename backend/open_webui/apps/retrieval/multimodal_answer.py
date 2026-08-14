@@ -45,6 +45,16 @@ def collect_retrieval_image_urls(
     return urls
 
 
+def build_retrieval_image_files(image_urls: list[str]) -> list[dict[str, str]]:
+    """Build the assistant image attachments consumed by the existing UI."""
+
+    return [
+        {"type": "image", "url": url}
+        for raw_url in image_urls
+        if (url := str(raw_url).strip())
+    ]
+
+
 def _image_url(item: dict[str, Any]) -> str:
     value = item.get("image_url")
     if isinstance(value, dict):

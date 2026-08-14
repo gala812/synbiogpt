@@ -49,6 +49,7 @@ from open_webui.apps.openai.main import (
     get_all_models_responses as get_openai_models_responses,
 )
 from open_webui.apps.retrieval.main import app as retrieval_app
+from open_webui.apps.retrieval.multimodal_answer import build_retrieval_image_files
 from open_webui.apps.retrieval.synbio import RetrievalPipeline
 from open_webui.apps.retrieval.synbio.citations import (
     build_citation_sources,
@@ -832,8 +833,9 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                     body["messages"],
                 )
 
+        retrieved_image_urls = []
         if RAG_MULTIMODAL_ENABLED and len(sources) > 0:
-            body["messages"], retrieved_images, injected_images = (
+            body["messages"], retrieved_image_urls, injected_images = (
                 prepare_multimodal_messages(
                     body["messages"],
                     sources,
@@ -845,7 +847,7 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                 "[MULTIMODAL-RAG] prepared Chinese evidence answer model=%s "
                 "retrieved_images=%d injected_images=%d",
                 body.get("model"),
-                retrieved_images,
+                len(retrieved_image_urls),
                 injected_images,
             )
 
@@ -857,6 +859,10 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                 [item.get("citation_index") for item in citation_sources[:5]],
             )
             data_items.append({"sources": citation_sources})
+
+        image_files = build_retrieval_image_files(retrieved_image_urls)
+        if image_files:
+            data_items.append({"files": image_files})
 
         modified_body_bytes = json.dumps(body).encode("utf-8")
         # Replace the request body with the modified one
