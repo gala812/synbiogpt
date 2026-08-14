@@ -15,13 +15,6 @@ def _optional_float(name: str) -> float | None:
     return float(value) if value else None
 
 
-def _probability(name: str, default: str = "0") -> float:
-    value = float(os.getenv(name, default))
-    if not 0 <= value <= 1:
-        raise ValueError(f"{name} must be between 0 and 1")
-    return value
-
-
 @dataclass(frozen=True, slots=True)
 class RetrievalConfig:
     """One immutable snapshot of the current retrieval environment."""
@@ -36,9 +29,6 @@ class RetrievalConfig:
     bm25_weight: float = 1.0
     cross_encoder_top_k: int = 10
     evidence_gate_min_score: float | None = None
-    evidence_calibration_log_path: str = ""
-    evidence_calibration_sample_rate: float = 0.0
-    evidence_calibration_max_text_chars: int = 4_000
     context_recovery_enabled: bool = True
     context_token_budget: int = 12_000
     context_max_parent_chunks: int = 12
@@ -77,20 +67,6 @@ class RetrievalConfig:
             ),
             evidence_gate_min_score=_optional_float(
                 "MEDCPT_EVIDENCE_GATE_MIN_SCORE"
-            ),
-            evidence_calibration_log_path=os.getenv(
-                "MEDCPT_EVIDENCE_CALIBRATION_LOG_PATH", ""
-            ).strip(),
-            evidence_calibration_sample_rate=_probability(
-                "MEDCPT_EVIDENCE_CALIBRATION_SAMPLE_RATE"
-            ),
-            evidence_calibration_max_text_chars=max(
-                1,
-                int(
-                    os.getenv(
-                        "MEDCPT_EVIDENCE_CALIBRATION_MAX_TEXT_CHARS", "4000"
-                    )
-                ),
             ),
             context_recovery_enabled=_enabled(
                 "MEDCPT_CONTEXT_RECOVERY_ENABLED", "true"
