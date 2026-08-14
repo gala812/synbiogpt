@@ -998,21 +998,19 @@ Strictly return in JSON format:
 """
 
 DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE = """### Task:
-Route the latest user message and, when literature evidence is needed, convert it
-into one English scientific retrieval query and one concise English lexical query.
-Do not answer the user.
+Convert the latest user message into one complete English scientific retrieval
+query and one concise English lexical query. Do not answer the user or decide
+whether retrieval should run.
 
 ### Rules:
-- Return EXCLUSIVELY one valid JSON object with the five fields shown below.
-- Set `route` to `retrieve` when the user asks for scientific facts, evidence,
-  mechanisms, methods, comparisons, data, literature-grounded recommendations,
-  or a follow-up that requires such evidence.
-- Set `route` to `chat` for greetings, thanks, casual conversation, UI/help
-  requests, or other messages that do not need literature evidence.
-- Use the recent chat history to resolve short follow-ups such as "What about its
-  limitations?". When uncertain in a scientific conversation, prefer `retrieve`.
-- For `chat`, return empty strings for both query fields and an empty exact-term
-  list.
+- Return EXCLUSIVELY one valid JSON object with the four fields shown below.
+- Always return non-empty `semantic_query` and `lexical_query` fields. Retrieval
+  is handled by the application and must not be disabled by this output.
+- Use the recent chat history to resolve short follow-ups. Rewrite a follow-up as
+  a self-contained research question, preserving the subject and constraints from
+  the relevant prior turns. For example, after a question about how CRISPRi raises
+  succinate production in Escherichia coli, "Why?" must be rewritten as the
+  complete mechanism question.
 - `semantic_query` must be a natural English research question suitable for
   SPECTER2 and the MedCPT Query Encoder.
 - `lexical_query` must contain concise English keywords and high-confidence
@@ -1027,7 +1025,6 @@ Do not answer the user.
 
 ### Output:
 {
-  "route": "retrieve or chat",
   "original_query": "latest user question",
   "semantic_query": "one English semantic retrieval question",
   "lexical_query": "English scientific keywords and synonyms",
@@ -1297,6 +1294,12 @@ DEFAULT_RAG_TEMPLATE = """### Task:
 Respond to the user query using the provided context, incorporating inline citations in the format [source_id] **only when the <source_id> tag is explicitly provided** in the context.
 
 ### Guidelines:
+- Retrieved context may contain irrelevant evidence.
+- Use only literature that directly supports the user's question; ignore every
+  unrelated source.
+- If no retrieved evidence is reliable and directly relevant, do not force a
+  knowledge-base citation. Answer from general knowledge when appropriate and be
+  clear that the retrieved literature did not provide reliable support.
 - If you don't know the answer, clearly state that.
 - If uncertain, ask the user for clarification.
 - Respond in the same language as the user's query.

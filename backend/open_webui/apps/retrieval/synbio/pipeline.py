@@ -31,6 +31,8 @@ from open_webui.apps.retrieval.search.rrf import (
 )
 
 from .config import RetrievalConfig
+from .evidence_calibration import collect_calibration_examples
+from .evidence_gate import apply_evidence_gate
 
 log = logging.getLogger("synbiogpt.app.retrieval.pipeline")
 
@@ -350,6 +352,8 @@ class RetrievalPipeline:
 
         reranked = []
         timings["rerank_seconds"] = 0.0
+        timings["evidence_calibration_seconds"] = 0.0
+        timings["evidence_gate_seconds"] = 0.0
         if rerank_enabled:
             selected_reranker = _selector(reranking_function, collection_name)
             top_n = (
@@ -367,6 +371,58 @@ class RetrievalPipeline:
                 relevance_threshold=relevance_threshold,
             )
             timings["rerank_seconds"] = time.perf_counter() - started
+            if getattr(selected_reranker, "uses_raw_logits", False):
+                started = time.perf_counter()
+                try:
+                    collected = collect_calibration_examples(
+                        path=self.config.evidence_calibration_log_path,
+                        sample_rate=self.config.evidence_calibration_sample_rate,
+                        max_text_chars=(
+                            self.config.evidence_calibration_max_text_chars
+                        ),
+                        query=processed,
+                        documents=reranked,
+                        collection_name=collection_name,
+                        cross_encoder_model=str(
+                            getattr(selected_reranker, "model_name", "") or ""
+                        ),
+                        cross_encoder_max_tokens=getattr(
+                            selected_reranker, "_max_tokens", None
+                        ),
+                    )
+                    if collected:
+                        log.info(
+                            "[EVIDENCE_CALIBRATION] collected=%d collection=%s",
+                            collected,
+                            collection_name,
+                        )
+                except Exception:
+                    log.exception(
+                        "[EVIDENCE_CALIBRATION] collection failed; retrieval continues"
+                    )
+                timings["evidence_calibration_seconds"] = (
+                    time.perf_counter() - started
+                )
+            started = time.perf_counter()
+            evidence_gate_min_score = (
+                self.config.evidence_gate_min_score
+                if getattr(selected_reranker, "uses_raw_logits", False)
+                else None
+            )
+            gated = apply_evidence_gate(
+                reranked,
+                min_cross_encoder_score=evidence_gate_min_score,
+            )
+            reranked = gated.documents
+            timings["evidence_gate_seconds"] = time.perf_counter() - started
+            log.info(
+                "[EVIDENCE_GATE] candidates=%d accepted=%d rejected=%d "
+                "threshold_configured=%s",
+                len(reranked) + gated.rejected_count,
+                len(reranked),
+                gated.rejected_count,
+                evidence_gate_min_score is not None,
+            )
         return RetrievalRun(processed, dense, bm25, fused, reranked, timings)
 
     def expand_evidence(

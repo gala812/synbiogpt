@@ -41,6 +41,14 @@ ASSETS = load(
 CONFIG = load(
     "open_webui.apps.retrieval.synbio.config", ROOT / "synbio/config.py"
 )
+EVIDENCE_CALIBRATION = load(
+    "open_webui.apps.retrieval.synbio.evidence_calibration",
+    ROOT / "synbio/evidence_calibration.py",
+)
+EVIDENCE_GATE = load(
+    "open_webui.apps.retrieval.synbio.evidence_gate",
+    ROOT / "synbio/evidence_gate.py",
+)
 PIPELINE = load(
     "open_webui.apps.retrieval.synbio.pipeline", ROOT / "synbio/pipeline.py"
 )
@@ -73,6 +81,23 @@ class Reranker:
         return [2.0 if "B" in text else 1.0 for text in documents]
 
 
+def test_evidence_gate_has_no_uncalibrated_default_threshold(monkeypatch):
+    monkeypatch.delenv("MEDCPT_EVIDENCE_GATE_MIN_SCORE", raising=False)
+    monkeypatch.delenv("MEDCPT_EVIDENCE_CALIBRATION_LOG_PATH", raising=False)
+    monkeypatch.delenv("MEDCPT_EVIDENCE_CALIBRATION_SAMPLE_RATE", raising=False)
+    assert RetrievalConfig.from_env().evidence_gate_min_score is None
+    assert RetrievalConfig.from_env().evidence_calibration_log_path == ""
+    assert RetrievalConfig.from_env().evidence_calibration_sample_rate == 0.0
+
+    monkeypatch.setenv("MEDCPT_EVIDENCE_GATE_MIN_SCORE", "1.25")
+    monkeypatch.setenv(
+        "MEDCPT_EVIDENCE_CALIBRATION_LOG_PATH", "C:/secure/evidence.jsonl"
+    )
+    monkeypatch.setenv("MEDCPT_EVIDENCE_CALIBRATION_SAMPLE_RATE", "0.1")
+    assert RetrievalConfig.from_env().evidence_gate_min_score == 1.25
+    assert RetrievalConfig.from_env().evidence_calibration_sample_rate == 0.1
+
+
 def test_formal_pipeline_preserves_hybrid_order_and_metadata():
     pipeline = RetrievalPipeline(
         RetrievalConfig(candidate_limit=10, cross_encoder_top_k=2)
@@ -97,6 +122,47 @@ def test_formal_pipeline_preserves_hybrid_order_and_metadata():
     assert [doc.metadata["chunk_id"] for doc in result.reranked_documents] == ["B", "A"]
     assert result.reranked_documents[0].metadata["retrieval_source"] == "hybrid"
     assert result.reranked_documents[0].metadata["rerank_rank"] == 1
+
+
+def test_evidence_gate_can_return_zero_without_changing_hybrid_or_reranking(
+    tmp_path,
+):
+    calibration_path = tmp_path / "calibration.jsonl"
+    pipeline = RetrievalPipeline(
+        RetrievalConfig(
+            candidate_limit=10,
+            cross_encoder_top_k=2,
+            evidence_gate_min_score=2.1,
+            evidence_calibration_log_path=str(calibration_path),
+            evidence_calibration_sample_rate=1.0,
+        )
+    )
+    query = ProcessedQuery(
+        "succinate production",
+        "succinate production",
+        "succinate production",
+        (),
+    )
+
+    result = pipeline.search_ranked(
+        query,
+        dense_search=lambda _: [
+            candidate("A", "dense", 0.9),
+            candidate("B", "dense", 0.8),
+        ],
+        bm25_search=lambda _: [candidate("B", "bm25", 8.0)],
+        embedding_function=lambda _: [],
+        reranking_function=Reranker(),
+        output_k=10,
+        relevance_threshold=0.0,
+    )
+
+    assert [item.chunk_id for item in result.fused_candidates] == ["B", "A"]
+    assert result.reranked_documents == []
+    assert result.timings["rerank_seconds"] >= 0
+    assert result.timings["evidence_gate_seconds"] >= 0
+    assert not EVIDENCE_GATE.has_evidence_documents({"documents": [[]]})
+    assert len(calibration_path.read_text("utf-8").splitlines()) == 2
 
 
 def test_formal_pipeline_expands_context_then_assets():

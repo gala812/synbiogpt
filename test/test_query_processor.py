@@ -120,17 +120,28 @@ def test_json_is_extracted_from_qwen_reasoning_wrapper():
     assert "succinic acid" in result.lexical_query
 
 
-def test_model_can_route_conversation_without_fabricating_a_query():
+def test_legacy_chat_route_cannot_disable_retrieval_query():
     result = QueryProcessor().process_model_output(
-        "你好", {"route": "chat", "semantic_query": "", "lexical_query": ""}
+        "你好",
+        {
+            "route": "chat",
+            "semantic_query": "What scientific literature is relevant to this request?",
+            "lexical_query": "relevant scientific literature",
+        },
     )
 
-    assert result.retrieval_required is False
-    assert result.semantic_query == ""
-    assert result.lexical_query == ""
+    assert result.semantic_query == (
+        "What scientific literature is relevant to this request?"
+    )
+    assert result.lexical_query == "relevant scientific literature"
 
 
-def test_scientific_route_still_requires_a_valid_query():
+def test_legacy_chat_route_without_a_query_is_rejected():
+    with pytest.raises(QueryProcessingError, match="retrieval query object"):
+        QueryProcessor().process_model_output("Hello", {"route": "chat"})
+
+
+def test_legacy_retrieve_route_is_accepted_but_not_required():
     result = QueryProcessor().process_model_output(
         "如何提高丁二酸产量？",
         {
@@ -140,5 +151,24 @@ def test_scientific_route_still_requires_a_valid_query():
         },
     )
 
-    assert result.retrieval_required is True
     assert result.semantic_query == "How can succinate production be improved?"
+
+
+def test_scientific_follow_up_is_self_contained():
+    result = QueryProcessor().process_model_output(
+        "为什么？",
+        {
+            "semantic_query": (
+                "Why can CRISPRi improve succinate production in Escherichia coli?"
+            ),
+            "lexical_query": (
+                "CRISPRi CRISPR interference Escherichia coli succinate production mechanism"
+            ),
+            "exact_terms": ["CRISPRi"],
+        },
+    )
+
+    assert result.semantic_query == (
+        "Why can CRISPRi improve succinate production in Escherichia coli?"
+    )
+    assert "succinate" in result.lexical_query

@@ -79,6 +79,14 @@ SYNBIO_CONFIG = _load_module(
     "open_webui.apps.retrieval.synbio.config",
     RETRIEVAL_ROOT / "synbio/config.py",
 )
+_load_module(
+    "open_webui.apps.retrieval.synbio.evidence_calibration",
+    RETRIEVAL_ROOT / "synbio/evidence_calibration.py",
+)
+_load_module(
+    "open_webui.apps.retrieval.synbio.evidence_gate",
+    RETRIEVAL_ROOT / "synbio/evidence_gate.py",
+)
 SYNBIO_PIPELINE = _load_module(
     "open_webui.apps.retrieval.synbio.pipeline",
     RETRIEVAL_ROOT / "synbio/pipeline.py",

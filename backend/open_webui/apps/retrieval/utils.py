@@ -12,6 +12,7 @@ from langchain_core.documents import Document
 from open_webui.apps.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.apps.retrieval.query_processor import ProcessedQuery
 from open_webui.apps.retrieval.synbio import RetrievalConfig, RetrievalPipeline
+from open_webui.apps.retrieval.synbio.evidence_gate import has_evidence_documents
 from open_webui.apps.retrieval.synbio.pipeline import (
     add_asset_urls,
 )
@@ -597,6 +598,7 @@ def get_embedding_function(
 
         return lambda query: generate_multiple(query, func)
 
+
 def get_sources_from_files(
     files,
     queries,
@@ -761,7 +763,7 @@ def get_sources_from_files(
         )
 
         # 6) collect context
-        if context:
+        if has_evidence_documents(context):
             if "data" in file:
                 try:
                     del file["data"]

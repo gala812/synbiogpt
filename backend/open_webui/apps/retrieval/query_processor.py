@@ -61,7 +61,6 @@ class ProcessedQuery:
     semantic_query: str
     lexical_query: str
     exact_terms: tuple[str, ...]
-    retrieval_required: bool = True
 
     @property
     def bm25_query(self) -> str:
@@ -103,15 +102,6 @@ class QueryProcessor:
 
         preparation = self.prepare(query)
         data = _parse_model_output(model_output)
-        if not _retrieval_required(data):
-            return ProcessedQuery(
-                original_query=preparation.original_query,
-                semantic_query="",
-                lexical_query="",
-                exact_terms=preparation.exact_terms,
-                retrieval_required=False,
-            )
-
         semantic = data.get("semantic_query")
         if not semantic and isinstance(data.get("queries"), list):
             semantic = next((item for item in data["queries"] if item), "")
@@ -171,7 +161,11 @@ def extract_exact_terms(query: str) -> list[str]:
 
 def _parse_model_output(output: str | dict) -> dict:
     if isinstance(output, dict):
-        return output
+        if "semantic_query" in output or "queries" in output:
+            return output
+        raise QueryProcessingError(
+            "Query-generation output is not a valid retrieval query object"
+        )
     text = str(output or "").strip()
     decoder = json.JSONDecoder()
     for match in re.finditer(r"\{", text):
@@ -180,19 +174,10 @@ def _parse_model_output(output: str | dict) -> dict:
         except json.JSONDecodeError:
             continue
         if isinstance(data, dict) and (
-            "route" in data
-            or "semantic_query" in data
-            or "queries" in data
+            "semantic_query" in data or "queries" in data
         ):
             return data
     raise QueryProcessingError("Query-generation output is not a valid JSON object")
-
-
-def _retrieval_required(data: dict) -> bool:
-    route = str(data.get("route", "retrieve")).strip().lower()
-    if route not in {"retrieve", "chat"}:
-        raise QueryProcessingError(f"Unsupported query route: {route}")
-    return route == "retrieve"
 
 
 def _protect_terms(query: str, terms: list[str]) -> tuple[str, dict[str, str]]:

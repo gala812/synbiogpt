@@ -567,9 +567,6 @@ async def chat_completion_files_handler(
             processed_query = SYNBIO_RETRIEVAL.process_generated_query(
                 original_query, generated
             )
-            if not processed_query.retrieval_required:
-                log.info("[PERF] rag.route route=chat sources=0")
-                return body, {"sources": []}
             queries = [processed_query]
         except Exception:
             log.info(
@@ -801,6 +798,10 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                     ]
                 )
                 citation_rules = (
+                    "Retrieved sources may include irrelevant evidence. Ignore any "
+                    "source that does not directly support the user's question.\n"
+                    "If none of the sources provides reliable direct support, do "
+                    "not cite the knowledge base.\n"
                     "You must cite sources using bracketed indices like [1] and [2].\n"
                     "Citation indices must come only from the Sources list below.\n"
                     "Do not cite indices that do not exist.\n"
