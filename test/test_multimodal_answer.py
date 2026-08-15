@@ -33,6 +33,37 @@ def test_builds_assistant_image_files():
     ]
 
 
+def test_builds_citation_aware_image_files_for_inline_display():
+    citations = [
+        {
+            "citation_index": 2,
+            "metadata": {
+                "visual_assets": [
+                    {
+                        "url": "http://assets/a",
+                        "caption": "Figure 1. Pathway.",
+                        "label": "Figure 1",
+                        "asset_type": "figure",
+                    }
+                ]
+            },
+        }
+    ]
+
+    assert MODULE.build_retrieval_image_files(
+        ["http://assets/a"], citations
+    ) == [
+        {
+            "type": "image",
+            "url": "http://assets/a",
+            "citation_index": 2,
+            "caption": "Figure 1. Pathway.",
+            "label": "Figure 1",
+            "asset_type": "figure",
+        }
+    ]
+
+
 def test_converts_string_content_and_preserves_original_chinese_query():
     messages = [{"role": "user", "content": "大肠杆菌中 ldhA 有什么作用？"}]
 

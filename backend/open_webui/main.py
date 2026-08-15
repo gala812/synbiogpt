@@ -56,11 +56,20 @@ from open_webui.apps.retrieval.synbio.citations import (
     resolve_citation_key,
     resolve_citation_title,
 )
+from open_webui.apps.retrieval.synbio.dialogue import (
+    get_no_evidence_mode,
+    get_no_evidence_prompt,
+    get_plain_chat_prompt,
+    is_first_user_message,
+)
 from open_webui.apps.retrieval.synbio.hooks import (
     prepare_multimodal_messages,
     protect_query_messages,
 )
-from open_webui.apps.retrieval.synbio.routing import add_default_knowledge
+from open_webui.apps.retrieval.synbio.routing import (
+    add_default_knowledge,
+    is_explicit_plain_chat,
+)
 from open_webui.apps.retrieval.utils import get_sources_from_files
 
 
@@ -537,10 +546,15 @@ async def chat_completion_tools_handler(
 
 async def chat_completion_files_handler(
     body: dict, user: UserModel
-) -> tuple[dict, dict[str, list]]:
+) -> tuple[dict, dict[str, object]]:
     sources = []
 
     metadata = body.get("metadata", {})
+    original_query = get_last_user_message(body["messages"])
+    if original_query and is_explicit_plain_chat(original_query):
+        log.info("[PERF] rag.route route=plain_chat sources=0")
+        return body, {"sources": sources, "plain_chat": True}
+
     files = add_default_knowledge(
         metadata.get("files"),
         metadata,
@@ -548,7 +562,6 @@ async def chat_completion_files_handler(
         collection=SYNBIO_RETRIEVAL.config.default_collection,
     )
     if files:
-        original_query = get_last_user_message(body["messages"])
         try:
             tq0 = time.perf_counter()
             queries_response = await generate_queries(
@@ -584,16 +597,31 @@ async def chat_completion_files_handler(
                 )
                 queries = []
 
+        if not queries:
+            return body, {
+                "sources": sources,
+                "no_evidence": True,
+                "no_evidence_reason": "query_generation_failed",
+            }
+
+        no_evidence_reason = None
         tr0 = time.perf_counter()
-        sources = get_sources_from_files(
-            files=files,
-            queries=queries,
-            embedding_function=retrieval_app.state.EMBEDDING_FUNCTION,
-            k=retrieval_app.state.config.TOP_K,
-            reranking_function=retrieval_app.state.sentence_transformer_rf,
-            r=retrieval_app.state.config.RELEVANCE_THRESHOLD,
-            hybrid_search=retrieval_app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-        )
+        try:
+            sources = get_sources_from_files(
+                files=files,
+                queries=queries,
+                embedding_function=retrieval_app.state.EMBEDDING_FUNCTION,
+                k=retrieval_app.state.config.TOP_K,
+                reranking_function=retrieval_app.state.sentence_transformer_rf,
+                r=retrieval_app.state.config.RELEVANCE_THRESHOLD,
+                hybrid_search=retrieval_app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+            )
+            if not sources:
+                no_evidence_reason = "empty"
+        except Exception:
+            sources = []
+            no_evidence_reason = "error"
+            log.exception("Knowledge retrieval failed")
         log.info(
             "[PERF] rag.sources duration=%.3fs sources=%d queries=%d files=%d hybrid=%s",
             time.perf_counter() - tr0,
@@ -604,6 +632,13 @@ async def chat_completion_files_handler(
         )
 
         log.debug(f"rag_contexts:sources: {sources}")
+
+        if no_evidence_reason:
+            return body, {
+                "sources": sources,
+                "no_evidence": True,
+                "no_evidence_reason": no_evidence_reason,
+            }
     return body, {"sources": sources}
 
 
@@ -737,11 +772,57 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             log.exception(e)
 
+        file_flags = {}
         try:
-            body, flags = await chat_completion_files_handler(body, user)
-            sources.extend(flags.get("sources", []))
+            body, file_flags = await chat_completion_files_handler(body, user)
+            sources.extend(file_flags.get("sources", []))
         except Exception as e:
             log.exception(e)
+
+        if file_flags.get("plain_chat"):
+            if sources:
+                log.warning(
+                    "Plain-chat route ignored %d source groups produced by tools",
+                    len(sources),
+                )
+                sources = []
+            first_user_message = is_first_user_message(body["messages"])
+            plain_chat_prompt = get_plain_chat_prompt(body["messages"])
+            if model["owned_by"] == "ollama":
+                body["messages"] = prepend_to_first_user_message_content(
+                    plain_chat_prompt,
+                    body["messages"],
+                )
+            else:
+                body["messages"] = add_or_update_system_message(
+                    plain_chat_prompt,
+                    body["messages"],
+                )
+            log.info(
+                "[PERF] rag.route route=plain_chat sources=0 first_user=%s",
+                first_user_message,
+            )
+        elif len(sources) > 0:
+            # The unchanged RAG block below handles source-backed messages.
+            pass
+        elif file_flags.get("no_evidence"):
+            mode = get_no_evidence_mode()
+            no_evidence_prompt = get_no_evidence_prompt(mode)
+            if model["owned_by"] == "ollama":
+                body["messages"] = prepend_to_first_user_message_content(
+                    no_evidence_prompt,
+                    body["messages"],
+                )
+            else:
+                body["messages"] = add_or_update_system_message(
+                    no_evidence_prompt,
+                    body["messages"],
+                )
+            log.info(
+                "[PERF] rag.route route=no_evidence mode=%s reason=%s",
+                mode,
+                file_flags.get("no_evidence_reason"),
+            )
 
         citation_sources = build_citation_sources(sources)
         citation_index_by_key = {
@@ -861,7 +942,9 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
             )
             data_items.append({"sources": citation_sources})
 
-        image_files = build_retrieval_image_files(retrieved_image_urls)
+        image_files = build_retrieval_image_files(
+            retrieved_image_urls, citation_sources
+        )
         if image_files:
             data_items.append({"files": image_files})
 

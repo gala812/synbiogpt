@@ -21,6 +21,72 @@ SynBioGPT 是合成生物学问答平台，核心增强点是知识库检索链�
 ## 环境要求
 - Node.js `>=18.13 <=22`
 - Python `3.11`
+- Docker Engine、Docker Compose v2（Docker部署）
+- NVIDIA Container Toolkit（后端使用CUDA版MedCPT时）
+
+## Docker Compose
+
+Docker只负责启动SynBioGPT前端和后端。Qwen、Qdrant、OpenSearch及已有索引仍由宿主机或外部服务器提供，不会重新建库或重新向量化。
+
+首次使用先创建配置：
+
+```bash
+cp .env.example .env
+```
+
+至少确认以下配置：
+
+```env
+OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
+OPENAI_API_KEY=
+OPENAI_MODEL=Qwen3.5-4B
+QDRANT_URI=http://host.docker.internal:6333
+OPENSEARCH_URI=http://host.docker.internal:9200
+MEDCPT_MODEL_DIR=/qiannanhu01/models/MedCPT
+SYNBIO_DATA_DIR=./backend/data
+```
+
+`host.docker.internal`表示Docker宿主机；外部服务应填写容器可访问的真实IP或DNS。`PAPER_ASSET_BASE_URL`必须填写浏览器也能访问的图片服务地址。
+
+### 开发模式
+
+```bash
+docker compose -f compose.yaml -f compose.dev.yaml up -d
+```
+
+首次运行若本地尚无镜像，Compose会自动构建；也可以显式追加`--build`。
+
+- 前端地址：`http://localhost:5173`，`src/`和`static/`已挂载并支持Vite HMR。
+- 后端地址：`http://localhost:8080`，`backend/`已挂载但不启用`uvicorn --reload`。
+- 修改Python后执行：
+
+```bash
+docker compose restart backend
+```
+
+普通源码修改无需重新构建。仅在`backend/requirements.txt`、`pyproject.toml`、`uv.lock`、`package.json`、`package-lock.json`或Dockerfile变化后重建对应镜像：
+
+```bash
+docker compose -f compose.yaml -f compose.dev.yaml build backend
+docker compose -f compose.yaml -f compose.dev.yaml build frontend
+```
+
+### 生产模式
+
+```bash
+docker compose up -d --build
+```
+
+默认访问地址为`http://localhost:8080`。生产前端由Nginx提供静态文件，并将API、SSE和WebSocket请求转发给后端。
+
+```bash
+docker compose logs -f backend
+docker compose down
+```
+
+`docker compose down`不会删除`${SYNBIO_DATA_DIR}`中的`webui.db`、上传文件和缓存；MedCPT目录以只读方式挂载到后端容器。
+
+如果Qwen运行在Docker宿主机，服务必须监听容器可达的地址（例如`0.0.0.0:8000`），而不是只监听宿主机回环地址；SynBioGPT容器仍使用`http://host.docker.internal:8000/v1`访问它。
 
 ## 快速启动（开发）
 
@@ -60,9 +126,29 @@ bash dev.sh
 
 ## 测试
 
-```bash
-python -m pytest backend/open_webui/test/apps/retrieval/test_lexical_index.py backend/open_webui/test/apps/retrieval/test_utils_hybrid.py -q
+日常后端测试直接使用已经创建好的项目虚拟环境，避免触发 Hatchling 的前端构建钩子。
+
+Windows PowerShell：
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest test/ -q
 ```
+
+Linux/macOS：
+
+```bash
+./.venv/bin/python -m pytest test/ -q
+```
+
+运行单个模块时，例如：
+
+```bash
+./.venv/bin/python -m pytest test/test_dialogue_routing.py -q
+```
+
+也可以跨平台执行 `uv run --no-sync python -m pytest test/ -q`。不要将裸
+`uv run python -m pytest ...` 用作日常测试命令；项目元数据变化后它可能执行
+`npm install` 和完整前端构建，首次运行会明显更慢。
 
 ## 说明
 - `backend/data/` 是业务数据目录，删除前请先备份。

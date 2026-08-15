@@ -13,6 +13,7 @@
 	export let content;
 	export let model = null;
 	export let sources = null;
+	export let inlineImageFiles = [];
 
 	export let save = false;
 	export let floatingButtons = true;
@@ -132,6 +133,7 @@
 		{content}
 		{model}
 		{save}
+		{inlineImageFiles}
 		sourceIds={(sources ?? []).reduce((acc, s) => {
 			if (s?.citation_index !== undefined && s?.citation_index !== null) {
 				const ids = [

@@ -12,6 +12,8 @@
 		title: string;
 		source?: string;
 		score?: number;
+		journal?: string;
+		publication_date?: string;
 		aliases: string[];
 	};
 
@@ -59,7 +61,10 @@
 				if (sourceAlias) aliases.add(sourceAlias);
 
 				const referenceAlias = asNonEmptyString(
-					item.reference_id ?? item.referenceId ?? item.metadata?.reference_id ?? item.metadata?.referenceId
+					item.reference_id ??
+						item.referenceId ??
+						item.metadata?.reference_id ??
+						item.metadata?.referenceId
 				);
 				if (referenceAlias) aliases.add(referenceAlias);
 
@@ -71,6 +76,16 @@
 					title: item.title ?? item.source ?? 'Unknown source',
 					source: item.source,
 					score: item.score,
+					journal: asNonEmptyString(item.journal ?? item.metadata?.journal) ?? undefined,
+					publication_date:
+						asNonEmptyString(
+							item.publication_date ??
+								item.metadata?.publication_date ??
+								item.published_at ??
+								item.metadata?.published_at ??
+								item.date ??
+								item.metadata?.date
+						) ?? undefined,
 					aliases: Array.from(aliases)
 				});
 			}
@@ -84,7 +99,11 @@
 				source.document.forEach((_doc: any, index: number) => {
 					const metadata = source.metadata?.[index] ?? {};
 					const title =
-						metadata?.title ?? metadata?.name ?? source?.source?.name ?? metadata?.source ?? 'Unknown source';
+						metadata?.title ??
+						metadata?.name ??
+						source?.source?.name ??
+						metadata?.source ??
+						'Unknown source';
 					const key = title;
 					const distance = source?.distances?.[index];
 
@@ -105,6 +124,11 @@
 							title,
 							source: metadata?.source ?? source?.source?.name,
 							score: distance,
+							journal: asNonEmptyString(metadata?.journal) ?? undefined,
+							publication_date:
+								asNonEmptyString(
+									metadata?.publication_date ?? metadata?.published_at ?? metadata?.date
+								) ?? undefined,
 							aliases: aliasCandidates
 						});
 						return;
@@ -143,14 +167,6 @@
 		selectedCitationIndex !== null
 			? sortedSources.filter((source) => source.citation_index === selectedCitationIndex)
 			: displayedSources;
-
-  $: console.log('[Citations debug]', {
-    sources,
-    sourcesLength: sources?.length,
-    contentPreview: content?.slice?.(0, 300),
-    sortedSources,
-    displayedSources
-  });
 </script>
 
 {#if sortedSources.length > 0}
@@ -200,7 +216,12 @@
 				showCitationModal = false;
 			}}
 		>
-			<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+			<svg
+				xmlns="http://www.w3.org/2000/svg"
+				viewBox="0 0 20 20"
+				fill="currentColor"
+				class="w-5 h-5"
+			>
 				<path
 					d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
 				/>
@@ -209,11 +230,32 @@
 	</div>
 
 	<div class="px-5 pb-5 max-h-[60vh] overflow-y-auto">
-		<div class="flex flex-col gap-2 text-sm">
+		<div class="flex flex-col text-sm">
 			{#each modalSources as source}
-				<div class="flex gap-2 text-gray-800 dark:text-gray-200">
-					<div class="shrink-0 text-gray-500">[{source.citation_index}]</div>
-					<div class="break-words">{source.title}</div>
+				<div class="border-b border-gray-100 py-3 first:pt-1 last:border-b-0 dark:border-gray-800">
+					<div class="flex items-start gap-2 text-gray-800 dark:text-gray-200">
+						<div
+							class="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-xs font-semibold text-gray-600 dark:bg-gray-800 dark:text-gray-300"
+						>
+							[{source.citation_index}]
+						</div>
+						<div class="break-words font-medium leading-5">{source.title}</div>
+					</div>
+					{#if source.journal || source.publication_date}
+						<div
+							class="mt-2 flex flex-col gap-1 border-t border-gray-100 pt-2 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400"
+						>
+							{#if source.journal}
+								<div><span class="font-medium">Journal:</span> {source.journal}</div>
+							{/if}
+							{#if source.publication_date}
+								<div>
+									<span class="font-medium">Publication date:</span>
+									{source.publication_date}
+								</div>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{/each}
 		</div>

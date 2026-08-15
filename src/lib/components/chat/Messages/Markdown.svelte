@@ -15,6 +15,7 @@
 	export let content;
 	export let model = null;
 	export let save = false;
+	export let inlineImageFiles = [];
 
 	export let sourceIds = [];
 	export let onSourceClick = () => {};
@@ -42,6 +43,7 @@
 		{tokens}
 		{id}
 		{save}
+		{inlineImageFiles}
 		{onSourceClick}
 		on:update={(e) => {
 			dispatch('update', e.detail);

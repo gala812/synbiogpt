@@ -17,6 +17,7 @@
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import ArrowDownTray from '$lib/components/icons/ArrowDownTray.svelte';
+	import Image from '$lib/components/common/Image.svelte';
 
 	const dispatch = createEventDispatcher();
 
@@ -26,6 +27,36 @@
 
 	export let save = false;
 	export let onSourceClick: Function = () => {};
+	export let inlineImageFiles: any[] = [];
+
+	let inlineImagesByToken = new Map<number, any[]>();
+
+	function buildInlineImagesByToken(currentTokens: Token[], files: any[]) {
+		const result = new Map<number, any[]>();
+		const displayedUrls = new Set<string>();
+
+		currentTokens.forEach((token, tokenIdx) => {
+			if (!['paragraph', 'text'].includes(token.type)) return;
+
+			const citationIds = new Set(
+				Array.from(`${token.raw ?? ''}`.matchAll(/<source_id\s+data="([^"]+)"\s*\/>/g)).map(
+					(match) => match[1]
+				)
+			);
+			const images = files.filter((file) => {
+				const url = `${file?.url ?? ''}`.trim();
+				const citationIndex = `${file?.citation_index ?? ''}`.trim();
+				if (!url || !citationIds.has(citationIndex) || displayedUrls.has(url)) return false;
+				displayedUrls.add(url);
+				return true;
+			});
+			if (images.length > 0) result.set(tokenIdx, images);
+		});
+
+		return result;
+	}
+
+	$: inlineImagesByToken = buildInlineImagesByToken(tokens ?? [], inlineImageFiles ?? []);
 
 	const headerComponent = (depth: number) => {
 		return 'h' + depth;
@@ -214,6 +245,20 @@
 				{onSourceClick}
 			/>
 		</p>
+		{#if inlineImagesByToken.has(tokenIdx)}
+			<div class="my-3 flex w-full flex-wrap gap-3">
+				{#each inlineImagesByToken.get(tokenIdx) ?? [] as file}
+					<figure class="m-0 max-w-full">
+						<Image src={file.url} alt={file.label || file.caption || 'Retrieved figure'} />
+						{#if file.label || file.caption}
+							<figcaption class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+								{file.label || file.caption}
+							</figcaption>
+						{/if}
+					</figure>
+				{/each}
+			</div>
+		{/if}
 	{:else if token.type === 'text'}
 		{#if top}
 			<p>
@@ -223,6 +268,20 @@
 					{unescapeHtml(token.text)}
 				{/if}
 			</p>
+			{#if inlineImagesByToken.has(tokenIdx)}
+				<div class="my-3 flex w-full flex-wrap gap-3">
+					{#each inlineImagesByToken.get(tokenIdx) ?? [] as file}
+						<figure class="m-0 max-w-full">
+							<Image src={file.url} alt={file.label || file.caption || 'Retrieved figure'} />
+							{#if file.label || file.caption}
+								<figcaption class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+									{file.label || file.caption}
+								</figcaption>
+							{/if}
+						</figure>
+					{/each}
+				</div>
+			{/if}
 		{:else if token.tokens}
 			<MarkdownInlineTokens
 				id={`${id}-${tokenIdx}-p`}

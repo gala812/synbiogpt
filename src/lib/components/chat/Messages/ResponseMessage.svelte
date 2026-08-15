@@ -203,7 +203,12 @@
 		return source?.metadata && !Array.isArray(source.metadata) ? source.metadata : {};
 	}
 
-	function normalizeCitationReference(source: any, fallbackIndex: number, documentText?: any, metadata?: any) {
+	function normalizeCitationReference(
+		source: any,
+		fallbackIndex: number,
+		documentText?: any,
+		metadata?: any
+	) {
 		const meta = metadata ?? getMetadata(source);
 		const title = firstText(
 			source?.title,
@@ -274,11 +279,7 @@
 	}
 
 	function normalizeCitationToken(rawToken: string) {
-		const cleaned = `${rawToken ?? ''}`
-			.trim()
-			.replace(/^\[/, '')
-			.replace(/\]$/, '')
-			.trim();
+		const cleaned = `${rawToken ?? ''}`.trim().replace(/^\[/, '').replace(/\]$/, '').trim();
 		const match = cleaned.match(/^S?(\d+)$/i);
 		if (!match) {
 			return {
@@ -330,10 +331,13 @@
 		if (referenceIdMatch) return referenceIdMatch;
 
 		if (index !== null) {
-			const fallbackByPosition = sourceReferences[index - 1] ?? citationReferences[index - 1] ?? null;
+			const fallbackByPosition =
+				sourceReferences[index - 1] ?? citationReferences[index - 1] ?? null;
 			if (fallbackByPosition) return fallbackByPosition;
 
-			const indexMatch = references.find((reference) => Number(reference?.citation_index) === index);
+			const indexMatch = references.find(
+				(reference) => Number(reference?.citation_index) === index
+			);
 			if (indexMatch) return indexMatch;
 			return null;
 		}
@@ -354,7 +358,15 @@
 	function getCitationExtras(reference: any) {
 		const metadata = reference?.metadata ?? {};
 		return [
-			['Journal', firstText(reference?.journal, metadata?.journal)],
+			[
+				'Journal',
+				firstText(
+					reference?.journal,
+					metadata?.journal,
+					reference?.journal_title,
+					metadata?.journal_title
+				)
+			],
 			[
 				'Publication date',
 				firstText(
@@ -363,12 +375,16 @@
 					reference?.published_at,
 					metadata?.published_at,
 					reference?.date,
-					metadata?.date
+					metadata?.date,
+					reference?.publication_year,
+					metadata?.publication_year,
+					reference?.year,
+					metadata?.year
 				)
 			],
 			['File', firstText(reference?.file_name, metadata?.file_name)],
 			['Page', firstText(reference?.page, metadata?.page)],
-			['Chunk', firstText(reference?.chunk_id, metadata?.chunk_id)],
+			['Chunk', firstText(reference?.chunk_id, metadata?.chunk_id)]
 			// ['Source', firstText(metadata?.source)]
 		].filter(([, value]) => value);
 	}
@@ -466,8 +482,7 @@
 					? rawTarget.parentElement
 					: null;
 		const root =
-			messageContentEl ??
-			(event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+			messageContentEl ?? (event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
 		if (!element || !root) return;
 
 		while (element && element !== root) {
@@ -497,15 +512,13 @@
 
 	function getCitationTokenFromTextRanges(event: MouseEvent, container: HTMLElement) {
 		const target =
-			event.target instanceof Node && container.contains(event.target)
-				? event.target
-				: container;
+			event.target instanceof Node && container.contains(event.target) ? event.target : container;
 		const scanRoot =
 			target instanceof HTMLElement
-				? (target.closest('sup, span, a, button, li, p, h1, h2, h3, h4, h5, h6') as
-						| HTMLElement
-						| null) ?? container
-				: target.parentElement ?? container;
+				? ((target.closest(
+						'sup, span, a, button, li, p, h1, h2, h3, h4, h5, h6'
+					) as HTMLElement | null) ?? container)
+				: (target.parentElement ?? container);
 
 		const walker = document.createTreeWalker(scanRoot, NodeFilter.SHOW_TEXT);
 		const range = document.createRange();
@@ -523,8 +536,10 @@
 					range.setEnd(node, match.index + match[0].length);
 
 					for (const rect of Array.from(range.getClientRects())) {
-						const withinX = event.clientX >= rect.left - padding && event.clientX <= rect.right + padding;
-						const withinY = event.clientY >= rect.top - padding && event.clientY <= rect.bottom + padding;
+						const withinX =
+							event.clientX >= rect.left - padding && event.clientX <= rect.right + padding;
+						const withinY =
+							event.clientY >= rect.top - padding && event.clientY <= rect.bottom + padding;
 
 						if (withinX && withinY) {
 							return match[1];
@@ -949,11 +964,11 @@
 			{/if}
 
 			<div>
-				{#if message?.files && message.files?.filter((f) => f.type === 'image').length > 0}
+				{#if message?.files && message.files?.filter((f) => f.type === 'image' && f.citation_index == null).length > 0}
 					<div class="my-2.5 w-full flex overflow-x-auto gap-2 flex-wrap">
 						{#each message.files as file}
 							<div>
-								{#if file.type === 'image'}
+								{#if file.type === 'image' && file.citation_index == null}
 									<Image src={file.url} alt={message.content} />
 								{/if}
 							</div>
@@ -1065,10 +1080,7 @@
 								</div>
 							</div>
 						{:else}
-							<div
-								class="w-full flex flex-col relative"
-								id="response-content-container"
-							>
+							<div class="w-full flex flex-col relative" id="response-content-container">
 								{#if message.content === '' && !message.error && !message.done}
 									<Skeleton
 										statusText={message.statusHistory?.[0]?.description ?? '模型正在思考中...'}
@@ -1080,6 +1092,9 @@
 										id={message.id}
 										content={message.content}
 										sources={message.sources ?? message.citations}
+										inlineImageFiles={(message.files ?? []).filter(
+											(file) => file.type === 'image' && file.citation_index != null
+										)}
 										floatingButtons={message?.done}
 										save={!readOnly}
 										{model}
@@ -1137,7 +1152,9 @@
 									style={`left: ${citationPopover.x}px; top: ${citationPopover.y}px;`}
 								>
 									<div class="mb-2 flex items-start gap-2">
-										<div class="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-xs font-semibold text-gray-600 dark:bg-gray-800 dark:text-gray-300">
+										<div
+											class="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-xs font-semibold text-gray-600 dark:bg-gray-800 dark:text-gray-300"
+										>
 											[{citationPopover.label}]
 										</div>
 										<div class="min-w-0 font-medium leading-5 break-words">
@@ -1146,13 +1163,17 @@
 									</div>
 
 									{#if getCitationContent(citationPopover.reference)}
-										<div class="mb-2 whitespace-pre-wrap break-words text-xs leading-5 text-gray-600 dark:text-gray-300">
+										<div
+											class="mb-2 whitespace-pre-wrap break-words text-xs leading-5 text-gray-600 dark:text-gray-300"
+										>
 											{getCitationContent(citationPopover.reference)}
 										</div>
 									{/if}
 
 									{#if getCitationExtras(citationPopover.reference).length > 0}
-										<div class="flex flex-col gap-1 border-t border-gray-100 pt-2 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
+										<div
+											class="flex flex-col gap-1 border-t border-gray-100 pt-2 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400"
+										>
 											{#each getCitationExtras(citationPopover.reference) as [label, value]}
 												<div class="flex gap-1.5">
 													<span class="shrink-0 font-medium">{label}:</span>

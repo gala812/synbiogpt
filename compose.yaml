@@ -1,0 +1,54 @@
+name: synbiogpt
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: synbiogpt-backend:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DOCKER: "true"
+      ENV: prod
+      DATA_DIR: /data
+      FRONTEND_BUILD_DIR: /app/frontend
+      MEDCPT_QUERY_ENCODER_MODEL: /models/MedCPT/Query-Encoder
+      MEDCPT_CROSS_ENCODER_MODEL: /models/MedCPT/Cross-Encoder
+    volumes:
+      - type: bind
+        source: ${SYNBIO_DATA_DIR:-./backend/data}
+        target: /data
+      - type: bind
+        source: ${MEDCPT_MODEL_DIR:-/qiannanhu01/models/MedCPT}
+        target: /models/MedCPT
+        read_only: true
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    gpus: all
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      target: production
+    image: synbiogpt-frontend:local
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${SYNBIO_PORT:-8080}:80"

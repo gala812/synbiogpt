@@ -45,14 +45,39 @@ def collect_retrieval_image_urls(
     return urls
 
 
-def build_retrieval_image_files(image_urls: list[str]) -> list[dict[str, str]]:
-    """Build the assistant image attachments consumed by the existing UI."""
+def build_retrieval_image_files(
+    image_urls: list[str], citation_sources: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Build image records, including the citation that controls inline placement."""
 
-    return [
-        {"type": "image", "url": url}
-        for raw_url in image_urls
-        if (url := str(raw_url).strip())
-    ]
+    evidence_by_url: dict[str, dict[str, Any]] = {}
+    for citation in citation_sources or []:
+        citation_index = citation.get("citation_index")
+        metadata = citation.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        for asset in metadata.get("visual_assets") or []:
+            if not isinstance(asset, dict):
+                continue
+            url = str(asset.get("url") or "").strip()
+            if url:
+                evidence_by_url[url] = {
+                    "citation_index": citation_index,
+                    "caption": str(asset.get("caption") or "").strip(),
+                    "label": str(asset.get("label") or "").strip(),
+                    "asset_type": str(asset.get("asset_type") or "image").strip(),
+                }
+
+    files = []
+    for raw_url in image_urls:
+        url = str(raw_url).strip()
+        if not url:
+            continue
+        file = {"type": "image", "url": url}
+        if evidence := evidence_by_url.get(url):
+            file.update(evidence)
+        files.append(file)
+    return files
 
 
 def _image_url(item: dict[str, Any]) -> str:
