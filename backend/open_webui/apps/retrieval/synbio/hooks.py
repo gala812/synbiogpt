@@ -7,10 +7,10 @@ from collections.abc import Callable
 from typing import Any
 
 from open_webui.apps.retrieval.multimodal_answer import (
-    CHINESE_EVIDENCE_SYSTEM_PROMPT,
     collect_retrieval_image_urls,
     inject_images_into_last_user_message,
 )
+from open_webui.apps.retrieval.prompts import MULTIMODAL_EVIDENCE_SYSTEM_PROMPT
 
 from .pipeline import RetrievalPipeline
 
@@ -40,7 +40,7 @@ def prepare_multimodal_messages(
 ) -> tuple[list[dict[str, Any]], list[str], int]:
     """Add the established Chinese-answer prompt and retrieved image evidence."""
 
-    prepared = add_system_message(CHINESE_EVIDENCE_SYSTEM_PROMPT, messages)
+    prepared = add_system_message(MULTIMODAL_EVIDENCE_SYSTEM_PROMPT, messages)
     image_urls = collect_retrieval_image_urls(sources, max_images=max_images)
     injected = inject_images_into_last_user_message(
         prepared, image_urls, max_images=max_images

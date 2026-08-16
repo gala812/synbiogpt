@@ -27,6 +27,7 @@ for package in (
 ):
     sys.modules.setdefault(package, ModuleType(package))
 
+PROMPTS = load("open_webui.apps.retrieval.prompts", ROOT / "prompts.py")
 QUERY = load("open_webui.apps.retrieval.query_processor", ROOT / "query_processor.py")
 MEDCPT = load("open_webui.apps.retrieval.models.medcpt", ROOT / "models/medcpt.py")
 RRF = load("open_webui.apps.retrieval.search.rrf", ROOT / "search/rrf.py")

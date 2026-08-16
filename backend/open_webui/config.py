@@ -10,6 +10,10 @@ from urllib.parse import urlparse
 import chromadb
 import requests
 import yaml
+from open_webui.apps.retrieval.prompts import (
+    RAG_SYSTEM_PROMPT_TEMPLATE as DEFAULT_RAG_TEMPLATE,
+    RETRIEVAL_QUERY_GENERATION_PROMPT as DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE,
+)
 from open_webui.apps.webui.internal.db import Base, get_db
 from open_webui.env import (
     OPEN_WEBUI_DIR,
@@ -997,46 +1001,6 @@ Strictly return in JSON format:
 </chat_history>
 """
 
-DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE = """### Task:
-Convert the latest user message into one complete English scientific retrieval
-query and one concise English lexical query. Do not answer the user or decide
-whether retrieval should run.
-
-### Rules:
-- Return EXCLUSIVELY one valid JSON object with the four fields shown below.
-- Always return non-empty `semantic_query` and `lexical_query` fields. Retrieval
-  is handled by the application and must not be disabled by this output.
-- Use the recent chat history to resolve short follow-ups. Rewrite a follow-up as
-  a self-contained research question, preserving the subject and constraints from
-  the relevant prior turns. For example, after a question about how CRISPRi raises
-  succinate production in Escherichia coli, "Why?" must be rewritten as the
-  complete mechanism question.
-- `semantic_query` must be a natural English research question suitable for
-  SPECTER2 and the MedCPT Query Encoder.
-- `lexical_query` must contain concise English keywords and high-confidence
-  synonyms suitable for BM25. Do not use Boolean query syntax.
-- If the question is already English, do not translate it; only improve its
-  retrieval wording when necessary.
-- Preserve every placeholder shaped like `ZXQENTITY<number>QXZ` exactly. These
-  placeholders represent genes, proteins, plasmids, strains, chemicals, or
-  experimental identifiers and must appear wherever the entity is relevant.
-- Do not add unsupported organisms, genes, mechanisms, or experimental facts.
-- Use only a small number of high-confidence synonym expansions.
-
-### Output:
-{
-  "original_query": "latest user question",
-  "semantic_query": "one English semantic retrieval question",
-  "lexical_query": "English scientific keywords and synonyms",
-  "exact_terms": ["identifiers copied exactly from the input"]
-}
-
-### Chat History:
-<chat_history>
-{{MESSAGES}}
-</chat_history>
-"""
-
 ENABLE_AUTOCOMPLETE_GENERATION = PersistentConfig(
     "ENABLE_AUTOCOMPLETE_GENERATION",
     "task.autocomplete.enable",
@@ -1289,43 +1253,6 @@ CHUNK_OVERLAP = PersistentConfig(
     "rag.chunk_overlap",
     int(os.environ.get("CHUNK_OVERLAP", "100")),
 )
-
-DEFAULT_RAG_TEMPLATE = """### Task:
-Respond to the user query using the provided context, incorporating inline citations in the format [source_id] **only when the <source_id> tag is explicitly provided** in the context.
-
-### Guidelines:
-- Retrieved context may contain irrelevant evidence.
-- Use only literature that directly supports the user's question; ignore every
-  unrelated source.
-- If no retrieved evidence is reliable and directly relevant, do not force a
-  knowledge-base citation. Answer from general knowledge when appropriate and be
-  clear that the retrieved literature did not provide reliable support.
-- If you don't know the answer, clearly state that.
-- If uncertain, ask the user for clarification.
-- Respond in the same language as the user's query.
-- If the context is unreadable or of poor quality, inform the user and provide the best possible answer.
-- If the answer isn't present in the context but you possess the knowledge, explain this to the user and provide the answer using your own understanding.
-- **Only include inline citations using [source_id] when a <source_id> tag is explicitly provided in the context.**  
-- Do not cite if the <source_id> tag is not provided in the context.  
-- Do not use XML tags in your response.
-- Ensure citations are concise and directly related to the information provided.
-
-### Example of Citation:
-If the user asks about a specific topic and the information is found in "whitepaper.pdf" with a provided <source_id>, the response should include the citation like so:  
-* "According to the study, the proposed method increases efficiency by 20% [whitepaper.pdf]."
-If no <source_id> is present, the response should omit the citation.
-
-### Output:
-Provide a clear and direct response to the user's query, including inline citations in the format [source_id] only when the <source_id> tag is present in the context.
-
-<context>
-{{CONTEXT}}
-</context>
-
-<user_query>
-{{QUERY}}
-</user_query>
-"""
 
 RAG_TEMPLATE = PersistentConfig(
     "RAG_TEMPLATE",

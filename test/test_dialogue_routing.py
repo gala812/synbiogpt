@@ -6,6 +6,7 @@ import pytest
 
 
 ROOT = Path(__file__).parents[1] / "backend/open_webui/apps/retrieval/synbio"
+PROMPTS_PATH = ROOT.parent / "prompts.py"
 
 
 def load(name, path):
@@ -18,6 +19,7 @@ def load(name, path):
 
 
 ROUTING = load("synbio_dialogue_routing", ROOT / "routing.py")
+PROMPTS = load("open_webui.apps.retrieval.prompts", PROMPTS_PATH)
 DIALOGUE = load("synbio_dialogue_prompts", ROOT / "dialogue.py")
 
 
@@ -142,8 +144,8 @@ def test_plain_chat_prompt_guides_only_on_first_user_message():
     first_prompt = DIALOGUE.get_plain_chat_prompt(first_turn)
     later_prompt = DIALOGUE.get_plain_chat_prompt(later_turn)
 
-    assert first_prompt == DIALOGUE.PLAIN_CHAT_SYSTEM_PROMPT
-    assert later_prompt == DIALOGUE.PLAIN_CHAT_SYSTEM_PROMPT_NO_GUIDE
+    assert first_prompt == PROMPTS.PLAIN_CHAT_SYSTEM_PROMPT
+    assert later_prompt == PROMPTS.PLAIN_CHAT_SYSTEM_PROMPT_NO_GUIDE
     assert "引导" in first_prompt
     assert "引导" not in later_prompt
 
@@ -151,7 +153,7 @@ def test_plain_chat_prompt_guides_only_on_first_user_message():
 def test_product_capability_prompt_states_project_facts():
     prompt = DIALOGUE.get_product_capability_prompt()
 
-    assert prompt == DIALOGUE.PRODUCT_CAPABILITY_SYSTEM_PROMPT
+    assert prompt == PROMPTS.PRODUCT_CAPABILITY_SYSTEM_PROMPT
     assert "全文文献知识库" in prompt
     assert "MedCPT" in prompt
     assert "BM25" in prompt
@@ -168,8 +170,8 @@ def test_no_evidence_prompts_use_distinct_defaults():
     answer = DIALOGUE.get_no_evidence_prompt("answer")
     refuse = DIALOGUE.get_no_evidence_prompt("refuse")
 
-    assert answer == DIALOGUE.NO_EVIDENCE_SYSTEM_PROMPT
-    assert refuse == DIALOGUE.NO_EVIDENCE_REFUSE_PROMPT
+    assert answer == PROMPTS.NO_EVIDENCE_SYSTEM_PROMPT
+    assert refuse == PROMPTS.NO_EVIDENCE_REFUSE_PROMPT
     assert answer and refuse and answer != refuse
 
 
