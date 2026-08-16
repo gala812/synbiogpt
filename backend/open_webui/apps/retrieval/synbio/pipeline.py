@@ -31,7 +31,11 @@ from open_webui.apps.retrieval.search.rrf import (
 )
 
 from .config import RetrievalConfig
-from .evidence_gate import apply_evidence_gate
+from .evidence_gate import (
+    apply_evidence_gate,
+    apply_exact_term_gate,
+    gate_rejection_reason,
+)
 
 log = logging.getLogger("synbiogpt.app.retrieval.pipeline")
 
@@ -44,6 +48,7 @@ class RetrievalRun:
     fused_candidates: list[FusedCandidate]
     reranked_documents: list[Document]
     timings: dict[str, float]
+    gate_diagnostics: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,9 +172,28 @@ class RetrievalPipeline:
         return self.query_processor.process(query)
 
     def process_generated_query(
-        self, query: str, model_output: str | dict
+        self,
+        query: str,
+        model_output: str | dict,
+        inherited_exact_terms: tuple[str, ...] = (),
     ) -> ProcessedQuery:
-        return self.query_processor.process_model_output(query, model_output)
+        return self.query_processor.process_model_output(
+            query,
+            model_output,
+            inherited_exact_terms=inherited_exact_terms,
+        )
+
+    def process_fallback_query(
+        self,
+        query: str,
+        semantic_query: str,
+        inherited_exact_terms: tuple[str, ...] = (),
+    ) -> ProcessedQuery:
+        return self.query_processor.process_fallback(
+            query,
+            semantic_query,
+            inherited_exact_terms=inherited_exact_terms,
+        )
 
     @staticmethod
     def ranked_from_documents(
@@ -352,6 +376,14 @@ class RetrievalPipeline:
         reranked = []
         timings["rerank_seconds"] = 0.0
         timings["evidence_gate_seconds"] = 0.0
+        gate_diagnostics: dict[str, Any] = {
+            "input_count": 0,
+            "output_count": 0,
+            "score_rejected_count": 0,
+            "exact_term_rejected_count": 0,
+            "exact_term_missing_terms": [],
+            "rejection_reason": None,
+        }
         if rerank_enabled:
             selected_reranker = _selector(reranking_function, collection_name)
             top_n = (
@@ -379,17 +411,54 @@ class RetrievalPipeline:
                 reranked,
                 min_cross_encoder_score=evidence_gate_min_score,
             )
-            reranked = gated.documents
+            exact_term_rejected_count = 0
+            exact_term_missing_terms: tuple[str, ...] = ()
+            if self.config.exact_term_gate_enabled:
+                exact_term_gated = apply_exact_term_gate(
+                    gated.documents,
+                    required_terms=processed.required_terms,
+                )
+                reranked = exact_term_gated.documents
+                exact_term_rejected_count = exact_term_gated.rejected_count
+                exact_term_missing_terms = exact_term_gated.missing_terms
+            else:
+                reranked = gated.documents
+
+            gate_diagnostics = {
+                "input_count": len(reranked)
+                + gated.rejected_count
+                + exact_term_rejected_count,
+                "output_count": len(reranked),
+                "score_rejected_count": gated.rejected_count,
+                "exact_term_rejected_count": exact_term_rejected_count,
+                "exact_term_missing_terms": list(exact_term_missing_terms),
+            }
+            gate_diagnostics["rejection_reason"] = gate_rejection_reason(
+                gate_diagnostics
+            )
             timings["evidence_gate_seconds"] = time.perf_counter() - started
             log.info(
                 "[EVIDENCE_GATE] candidates=%d accepted=%d rejected=%d "
-                "threshold_configured=%s",
-                len(reranked) + gated.rejected_count,
+                "exact_term_rejected=%d missing_terms=%s reason=%s "
+                "threshold_configured=%s exact_term_gate_enabled=%s",
+                gate_diagnostics["input_count"],
                 len(reranked),
                 gated.rejected_count,
+                exact_term_rejected_count,
+                list(exact_term_missing_terms),
+                gate_diagnostics["rejection_reason"],
                 evidence_gate_min_score is not None,
+                self.config.exact_term_gate_enabled,
             )
-        return RetrievalRun(processed, dense, bm25, fused, reranked, timings)
+        return RetrievalRun(
+            processed,
+            dense,
+            bm25,
+            fused,
+            reranked,
+            timings,
+            gate_diagnostics,
+        )
 
     def expand_evidence(
         self,

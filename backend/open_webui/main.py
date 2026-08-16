@@ -56,6 +56,15 @@ from open_webui.apps.retrieval.synbio.citations import (
     resolve_citation_key,
     resolve_citation_title,
 )
+from open_webui.apps.retrieval.synbio.conversation import (
+    RecentQueryCache,
+    answer_message_window,
+    conversation_key,
+    fallback_semantic_query,
+    inherited_exact_terms,
+    is_contextual_follow_up,
+    query_message_window,
+)
 from open_webui.apps.retrieval.synbio.dialogue import (
     get_no_evidence_mode,
     get_no_evidence_prompt,
@@ -69,6 +78,7 @@ from open_webui.apps.retrieval.synbio.hooks import (
 from open_webui.apps.retrieval.synbio.routing import (
     add_default_knowledge,
     is_explicit_plain_chat,
+    requests_visual_evidence,
 )
 from open_webui.apps.retrieval.utils import get_sources_from_files
 
@@ -77,9 +87,10 @@ RAG_MULTIMODAL_ENABLED = (
     os.getenv("RAG_MULTIMODAL_ENABLED", "false").strip().lower() == "true"
 )
 RAG_MULTIMODAL_MAX_IMAGES = max(
-    0, int(os.getenv("RAG_MULTIMODAL_MAX_IMAGES", "16"))
+    0, min(4, int(os.getenv("RAG_MULTIMODAL_MAX_IMAGES", "4")))
 )
 SYNBIO_RETRIEVAL = RetrievalPipeline()
+RECENT_QUERY_CACHE = RecentQueryCache()
 
 
 from open_webui.apps.socket.main import (
@@ -550,7 +561,7 @@ async def chat_completion_files_handler(
     sources = []
 
     metadata = body.get("metadata", {})
-    original_query = get_last_user_message(body["messages"])
+    original_query = get_last_user_message(body["messages"]) or ""
     if original_query and is_explicit_plain_chat(original_query):
         log.info("[PERF] rag.route route=plain_chat sources=0")
         return body, {"sources": sources, "plain_chat": True}
@@ -562,12 +573,23 @@ async def chat_completion_files_handler(
         collection=SYNBIO_RETRIEVAL.config.default_collection,
     )
     if files:
+        history_window = query_message_window(body["messages"])
+        inherited_terms = inherited_exact_terms(
+            history_window.messages, original_query
+        )
+        visual_evidence_requested = requests_visual_evidence(original_query)
+        query_cache_key = conversation_key(user.id, metadata)
+        previous_query = (
+            RECENT_QUERY_CACHE.get(query_cache_key)
+            if is_contextual_follow_up(original_query)
+            else None
+        )
         try:
             tq0 = time.perf_counter()
             queries_response = await generate_queries(
                 {
                     "model": body["model"],
-                    "messages": body["messages"],
+                    "messages": history_window.messages,
                     "type": "retrieval",
                 },
                 user,
@@ -578,7 +600,9 @@ async def chat_completion_files_handler(
             )
             generated = queries_response["choices"][0]["message"]["content"]
             processed_query = SYNBIO_RETRIEVAL.process_generated_query(
-                original_query, generated
+                original_query,
+                generated,
+                inherited_exact_terms=inherited_terms,
             )
             queries = [processed_query]
         except Exception:
@@ -589,13 +613,44 @@ async def chat_completion_files_handler(
             queries = []
 
         if len(queries) == 0:
-            try:
-                queries = [SYNBIO_RETRIEVAL.process_query(original_query)]
-            except Exception:
-                log.exception(
-                    "Retrieval query generation failed and no English fallback is available"
+            fallback_terms = inherited_terms
+            fallback = None
+            fallback_source = "entities"
+            if previous_query is not None:
+                fallback = previous_query.semantic_query
+                fallback_terms = tuple(
+                    dict.fromkeys(
+                        [*inherited_terms, *previous_query.exact_terms]
+                    )
                 )
-                queries = []
+                fallback_source = "previous_query"
+            else:
+                try:
+                    queries = [SYNBIO_RETRIEVAL.process_query(original_query)]
+                except Exception:
+                    fallback = fallback_semantic_query(
+                        original_query, fallback_terms
+                    )
+
+            if not queries and fallback:
+                queries = [
+                    SYNBIO_RETRIEVAL.process_fallback_query(
+                        original_query,
+                        fallback,
+                        inherited_exact_terms=fallback_terms,
+                    )
+                ]
+                log.warning(
+                    "Retrieval query generation used safe fallback source=%s "
+                    "inherited_entities=%d",
+                    fallback_source,
+                    len(fallback_terms),
+                )
+            elif not queries:
+                log.error(
+                    "Retrieval query generation failed and no safe fallback is "
+                    "available"
+                )
 
         if not queries:
             return body, {
@@ -605,6 +660,7 @@ async def chat_completion_files_handler(
             }
 
         no_evidence_reason = None
+        retrieval_diagnostics = {}
         tr0 = time.perf_counter()
         try:
             sources = get_sources_from_files(
@@ -615,9 +671,17 @@ async def chat_completion_files_handler(
                 reranking_function=retrieval_app.state.sentence_transformer_rf,
                 r=retrieval_app.state.config.RELEVANCE_THRESHOLD,
                 hybrid_search=retrieval_app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+                include_assets=visual_evidence_requested,
+                retrieval_diagnostics=retrieval_diagnostics,
             )
             if not sources:
-                no_evidence_reason = "empty"
+                no_evidence_reason = (
+                    "gate_rejected"
+                    if retrieval_diagnostics.get("rejection_reason")
+                    else "empty"
+                )
+            elif query_cache_key:
+                RECENT_QUERY_CACHE.put(query_cache_key, queries[0])
         except Exception:
             sources = []
             no_evidence_reason = "error"
@@ -630,6 +694,28 @@ async def chat_completion_files_handler(
             len(files),
             retrieval_app.state.config.ENABLE_RAG_HYBRID_SEARCH,
         )
+        gate_input_count = int(retrieval_diagnostics.get("input_count") or 0)
+        gate_rejected_count = int(
+            retrieval_diagnostics.get("score_rejected_count") or 0
+        ) + int(retrieval_diagnostics.get("exact_term_rejected_count") or 0)
+        log.info(
+            "[EVIDENCE_GATE_REQUEST] candidates=%d rejected=%d rate=%.4f "
+            "score_rejected=%d exact_term_rejected=%d reason=%s",
+            gate_input_count,
+            gate_rejected_count,
+            gate_rejected_count / gate_input_count if gate_input_count else 0.0,
+            int(retrieval_diagnostics.get("score_rejected_count") or 0),
+            int(retrieval_diagnostics.get("exact_term_rejected_count") or 0),
+            retrieval_diagnostics.get("rejection_reason"),
+        )
+        log.info(
+            "[PERF] rag.query_context estimated_tokens=%d omitted_messages=%d "
+            "inherited_entities=%d visual_evidence=%s",
+            history_window.estimated_tokens,
+            history_window.omitted_messages,
+            len(inherited_terms),
+            visual_evidence_requested,
+        )
 
         log.debug(f"rag_contexts:sources: {sources}")
 
@@ -638,6 +724,9 @@ async def chat_completion_files_handler(
                 "sources": sources,
                 "no_evidence": True,
                 "no_evidence_reason": no_evidence_reason,
+                "gate_rejected_reason": retrieval_diagnostics.get(
+                    "rejection_reason"
+                ),
             }
     return body, {"sources": sources}
 
@@ -819,9 +908,11 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                     body["messages"],
                 )
             log.info(
-                "[PERF] rag.route route=no_evidence mode=%s reason=%s",
+                "[PERF] rag.route route=no_evidence mode=%s reason=%s "
+                "gate_reason=%s",
                 mode,
                 file_flags.get("no_evidence_reason"),
+                file_flags.get("gate_rejected_reason"),
             )
 
         citation_sources = build_citation_sources(sources)
@@ -884,6 +975,9 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                     "If none of the sources provides reliable direct support, do "
                     "not cite the knowledge base.\n"
                     "You must cite sources using bracketed indices like [1] and [2].\n"
+                    "Every paragraph that uses retrieved text, figure, or table "
+                    "evidence must contain its supporting [n] citation in that "
+                    "paragraph.\n"
                     "Citation indices must come only from the Sources list below.\n"
                     "Do not cite indices that do not exist.\n"
                     "If one statement is supported by multiple sources, use [1][2]."
@@ -947,6 +1041,14 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
         )
         if image_files:
             data_items.append({"files": image_files})
+
+        answer_window = answer_message_window(body["messages"])
+        body["messages"] = answer_window.messages
+        log.info(
+            "[PERF] rag.answer_context estimated_tokens=%d omitted_messages=%d",
+            answer_window.estimated_tokens,
+            answer_window.omitted_messages,
+        )
 
         modified_body_bytes = json.dumps(body).encode("utf-8")
         # Replace the request body with the modified one

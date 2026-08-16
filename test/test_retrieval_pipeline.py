@@ -85,6 +85,37 @@ def test_evidence_gate_has_no_uncalibrated_default_threshold(monkeypatch):
     assert RetrievalConfig.from_env().evidence_gate_min_score == 1.25
 
 
+def test_exact_term_gate_env_switch_defaults_on(monkeypatch):
+    monkeypatch.delenv("MEDCPT_EXACT_TERM_GATE_ENABLED", raising=False)
+    assert RetrievalConfig.from_env().exact_term_gate_enabled is True
+
+    monkeypatch.setenv("MEDCPT_EXACT_TERM_GATE_ENABLED", "false")
+    assert RetrievalConfig.from_env().exact_term_gate_enabled is False
+
+
+def test_gate_rejection_reason_distinguishes_empty_score_exact_and_mixed():
+    base = {
+        "input_count": 2,
+        "output_count": 0,
+        "score_rejected_count": 0,
+        "exact_term_rejected_count": 0,
+    }
+
+    assert EVIDENCE_GATE.gate_rejection_reason(base) is None
+    assert EVIDENCE_GATE.gate_rejection_reason(
+        {**base, "score_rejected_count": 2}
+    ) == "score"
+    assert EVIDENCE_GATE.gate_rejection_reason(
+        {**base, "exact_term_rejected_count": 2}
+    ) == "exact_term"
+    assert EVIDENCE_GATE.gate_rejection_reason(
+        {**base, "score_rejected_count": 1, "exact_term_rejected_count": 1}
+    ) == "score_and_exact_term"
+    assert EVIDENCE_GATE.gate_rejection_reason(
+        {**base, "output_count": 1, "score_rejected_count": 1}
+    ) is None
+
+
 def test_formal_pipeline_preserves_hybrid_order_and_metadata():
     pipeline = RetrievalPipeline(
         RetrievalConfig(candidate_limit=10, cross_encoder_top_k=2)
@@ -143,7 +174,50 @@ def test_evidence_gate_can_return_zero_without_changing_hybrid_or_reranking():
     assert result.reranked_documents == []
     assert result.timings["rerank_seconds"] >= 0
     assert result.timings["evidence_gate_seconds"] >= 0
+    assert result.gate_diagnostics["rejection_reason"] == "score"
+    assert result.gate_diagnostics["score_rejected_count"] == 2
     assert not EVIDENCE_GATE.has_evidence_documents({"documents": [[]]})
+
+
+def test_exact_term_gate_can_be_disabled_without_changing_retrieval():
+    query = ProcessedQuery(
+        "pckA regulation",
+        "succinate production",
+        "pckA regulation",
+        ("pckA",),
+        ("pckA",),
+    )
+    search = lambda _: [candidate("pcnB", "dense", 0.9)]
+
+    enabled = RetrievalPipeline(
+        RetrievalConfig(candidate_limit=10, exact_term_gate_enabled=True)
+    ).search_ranked(
+        query,
+        dense_search=search,
+        bm25_search=lambda _: [],
+        embedding_function=lambda _: [],
+        reranking_function=Reranker(),
+        output_k=10,
+        relevance_threshold=0.0,
+    )
+    disabled = RetrievalPipeline(
+        RetrievalConfig(candidate_limit=10, exact_term_gate_enabled=False)
+    ).search_ranked(
+        query,
+        dense_search=search,
+        bm25_search=lambda _: [],
+        embedding_function=lambda _: [],
+        reranking_function=Reranker(),
+        output_k=10,
+        relevance_threshold=0.0,
+    )
+
+    assert enabled.reranked_documents == []
+    assert enabled.gate_diagnostics["rejection_reason"] == "exact_term"
+    assert enabled.gate_diagnostics["exact_term_rejected_count"] == 1
+    assert len(disabled.reranked_documents) == 1
+    assert disabled.gate_diagnostics["rejection_reason"] is None
+    assert disabled.gate_diagnostics["exact_term_rejected_count"] == 0
 
 
 def test_formal_pipeline_expands_context_then_assets():
@@ -233,3 +307,57 @@ def test_webui_hooks_preserve_query_and_multimodal_message_shapes():
         "type": "image_url",
         "image_url": {"url": "http://assets/a"},
     }
+
+
+def test_exact_term_gate_rejects_similarly_spelled_substitutes():
+    documents = [
+        Document(
+            page_content="A CRISPRi screen identified pcnB repression.",
+            metadata={"paper_title": "CRISPRi screen"},
+        )
+    ]
+
+    result = EVIDENCE_GATE.apply_exact_term_gate(
+        documents, required_terms=("CRISPRi", "pckA")
+    )
+
+    assert result.documents == []
+    assert result.rejected_count == 1
+    assert result.missing_terms == ("pckA",)
+
+
+def test_exact_term_gate_accepts_coverage_across_multiple_documents():
+    crispri = Document(
+        page_content="CRISPRi enables programmable transcriptional repression.",
+        metadata={},
+    )
+    target = Document(
+        page_content="The pckA target controls phosphoenolpyruvate metabolism.",
+        metadata={},
+    )
+    unrelated = Document(page_content="Generic fermentation background.", metadata={})
+
+    result = EVIDENCE_GATE.apply_exact_term_gate(
+        [crispri, target, unrelated], required_terms=("CRISPRi", "pckA")
+    )
+
+    assert result.documents == [crispri, target]
+    assert result.rejected_count == 1
+    assert result.missing_terms == ()
+
+
+def test_exact_term_gate_understands_common_entity_punctuation_variants():
+    document = Document(
+        page_content=(
+            "Recombinant expression used Escherichia coli BL21 (DE3) and "
+            "the pET28a vector."
+        ),
+        metadata={},
+    )
+
+    result = EVIDENCE_GATE.apply_exact_term_gate(
+        [document], required_terms=("E. coli", "BL21(DE3)", "pET-28a(+)")
+    )
+
+    assert result.documents == [document]
+    assert result.missing_terms == ()

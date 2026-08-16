@@ -140,3 +140,30 @@ def test_no_evidence_mode_is_normalized_in_dialogue_module(monkeypatch):
     assert DIALOGUE.get_no_evidence_mode() == "refuse"
     monkeypatch.setattr(DIALOGUE, "NO_EVIDENCE_MODE", "unexpected")
     assert DIALOGUE.get_no_evidence_mode() == "answer"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "请结合文献图片说明细菌纤维素的应用",
+        "这些图中哪个展示伤口愈合过程？",
+        "相关表格说明了哪些性能？",
+        "Explain the pathway in Figure 2.",
+        "Show the relevant table evidence.",
+    ],
+)
+def test_explicit_visual_requests_enable_visual_evidence(message):
+    assert ROUTING.requests_visual_evidence(message) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "ldhA 敲除如何影响丁二酸产量？",
+        "如何控制 dCas9 表达强度？",
+        "试图提高产量是否合理？",
+        None,
+    ],
+)
+def test_non_visual_questions_do_not_expand_images(message):
+    assert ROUTING.requests_visual_evidence(message) is False

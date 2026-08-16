@@ -29,12 +29,13 @@ class RetrievalConfig:
     bm25_weight: float = 1.0
     cross_encoder_top_k: int = 10
     evidence_gate_min_score: float | None = None
+    exact_term_gate_enabled: bool = True
     context_recovery_enabled: bool = True
     context_token_budget: int = 12_000
     context_max_parent_chunks: int = 12
     asset_expansion_enabled: bool = True
-    asset_max_groups: int = 8
-    asset_max_images: int = 16
+    asset_max_groups: int = 4
+    asset_max_images: int = 4
     asset_base_url: str = ""
     fulltext_collections: frozenset[str] = frozenset({"fulltext_medcpt_ip_v1"})
 
@@ -68,6 +69,9 @@ class RetrievalConfig:
             evidence_gate_min_score=_optional_float(
                 "MEDCPT_EVIDENCE_GATE_MIN_SCORE"
             ),
+            exact_term_gate_enabled=_enabled(
+                "MEDCPT_EXACT_TERM_GATE_ENABLED", "true"
+            ),
             context_recovery_enabled=_enabled(
                 "MEDCPT_CONTEXT_RECOVERY_ENABLED", "true"
             ),
@@ -81,10 +85,10 @@ class RetrievalConfig:
                 "MEDCPT_ASSET_EXPANSION_ENABLED", "true"
             ),
             asset_max_groups=max(
-                1, int(os.getenv("MEDCPT_ASSET_MAX_GROUPS", "8"))
+                1, min(4, int(os.getenv("MEDCPT_ASSET_MAX_GROUPS", "4")))
             ),
             asset_max_images=max(
-                1, int(os.getenv("MEDCPT_ASSET_MAX_IMAGES", "16"))
+                1, min(4, int(os.getenv("MEDCPT_ASSET_MAX_IMAGES", "4")))
             ),
             asset_base_url=os.getenv("PAPER_ASSET_BASE_URL", "").rstrip("/"),
             fulltext_collections=collections,

@@ -8,6 +8,12 @@ from typing import Any
 
 
 _TRAILING_PUNCTUATION = re.compile(r"[.!?。！？]+$")
+_VISUAL_EVIDENCE_RE = re.compile(
+    r"(?:图片|图像|图表|插图|示意图|流程图|结构图|显微图|表格|图中|表中|"
+    r"结合(?:图|表)|展示(?:图|表)|"
+    r"\b(?:image|figure|fig\.?|table|diagram|chart|plot|visual)\b)",
+    re.IGNORECASE,
+)
 _PLAIN_CHAT_MESSAGES = frozenset(
     {
         "你好",
@@ -56,6 +62,12 @@ def route_flags(message: Any) -> dict[str, bool]:
     """Return request-scoped routing flags for an original user message."""
 
     return {"plain_chat": True} if is_explicit_plain_chat(message) else {}
+
+
+def requests_visual_evidence(message: Any) -> bool:
+    """Return whether the user explicitly asks for figure or table evidence."""
+
+    return isinstance(message, str) and bool(_VISUAL_EVIDENCE_RE.search(message))
 
 
 def add_default_knowledge(

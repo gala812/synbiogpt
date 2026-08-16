@@ -9,6 +9,12 @@ from dataclasses import asdict, dataclass
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _SPACE_RE = re.compile(r"\s+")
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[._+()/-][A-Za-z0-9+()-]*)*")
+_COMPOUND_ENTITY_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"[A-Z]\.\s*[a-z]{2,}|"
+    r"[A-Za-z]{1,8}\d+[A-Za-z0-9-]*\([A-Za-z0-9-]+\)"
+    r")(?![A-Za-z0-9_])"
+)
 _STRONG_ENTITY_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"BBa_[A-Za-z0-9_]+|"
@@ -61,6 +67,7 @@ class ProcessedQuery:
     semantic_query: str
     lexical_query: str
     exact_terms: tuple[str, ...]
+    required_terms: tuple[str, ...] = ()
 
     @property
     def bm25_query(self) -> str:
@@ -71,6 +78,7 @@ class ProcessedQuery:
     def to_dict(self) -> dict:
         result = asdict(self)
         result["exact_terms"] = list(self.exact_terms)
+        result["required_terms"] = list(self.required_terms)
         return result
 
 
@@ -96,7 +104,10 @@ class QueryProcessor:
         return self._build(preparation, preparation.original_query, "")
 
     def process_model_output(
-        self, query: str, model_output: str | dict
+        self,
+        query: str,
+        model_output: str | dict,
+        inherited_exact_terms: tuple[str, ...] = (),
     ) -> ProcessedQuery:
         """Validate the first base-model call and restore protected entities."""
 
@@ -120,43 +131,85 @@ class QueryProcessor:
         )
         if _CJK_RE.search(lexical):
             lexical = ""
-        return self._build(preparation, semantic, lexical)
+        return self._build(
+            preparation,
+            semantic,
+            lexical,
+            inherited_exact_terms=inherited_exact_terms,
+        )
+
+    def process_fallback(
+        self,
+        query: str,
+        semantic_query: str,
+        inherited_exact_terms: tuple[str, ...] = (),
+    ) -> ProcessedQuery:
+        """Build a retrieval query from a conservative English fallback."""
+
+        preparation = self.prepare(query)
+        semantic = _normalize_query(semantic_query)
+        if not semantic or _CJK_RE.search(semantic):
+            raise QueryProcessingError("Fallback semantic query must be English")
+        semantic = _append_missing(semantic, list(preparation.exact_terms))
+        return self._build(
+            preparation,
+            semantic,
+            "",
+            inherited_exact_terms=inherited_exact_terms,
+        )
 
     @staticmethod
     def _build(
-        preparation: QueryPreparation, semantic: str, lexical: str
+        preparation: QueryPreparation,
+        semantic: str,
+        lexical: str,
+        *,
+        inherited_exact_terms: tuple[str, ...] = (),
     ) -> ProcessedQuery:
+        inherited = _unique(list(inherited_exact_terms))
+        semantic = _append_missing(semantic, inherited)
         lexical = lexical or _lexical_from_semantic(semantic)
+        lexical = _append_missing(lexical, inherited)
         lexical = _expand_high_confidence_terms(
             preparation.original_query, semantic, lexical
         )
+        exact_terms = _unique([*preparation.exact_terms, *inherited])
         return ProcessedQuery(
             original_query=preparation.original_query,
             semantic_query=semantic,
             lexical_query=lexical,
-            exact_terms=preparation.exact_terms,
+            exact_terms=tuple(exact_terms),
+            required_terms=preparation.exact_terms,
         )
 
 
 def extract_exact_terms(query: str) -> list[str]:
     """Extract high-confidence identifiers while avoiding ordinary English words."""
 
-    candidates: list[tuple[int, str]] = [
-        (match.start(), match.group(0)) for match in _STRONG_ENTITY_RE.finditer(query)
-    ]
-    if _CJK_RE.search(query):
-        candidates.extend(
-            (match.start(), match.group(0)) for match in _WORD_RE.finditer(query)
+    matches: list[tuple[int, int, int, str]] = []
+    for priority, pattern in enumerate((_COMPOUND_ENTITY_RE, _STRONG_ENTITY_RE)):
+        matches.extend(
+            (match.start(), match.end(), priority, match.group(0))
+            for match in pattern.finditer(query)
         )
-    else:
-        candidates.extend(
-            (match.start(), match.group(0))
-            for match in _WORD_RE.finditer(query)
-            if match.group(0).lower() in _KNOWN_LOWERCASE_ENTITIES
-        )
+    matches.extend(
+        (match.start(), match.end(), 2, match.group(0))
+        for match in _WORD_RE.finditer(query)
+        if match.group(0).lower() in _KNOWN_LOWERCASE_ENTITIES
+    )
 
-    ordered = sorted(candidates, key=lambda item: item[0])
-    return _unique([term for _, term in ordered])
+    selected: list[tuple[int, int, str]] = []
+    for start, end, _, term in sorted(
+        matches, key=lambda item: (item[2], -(item[1] - item[0]), item[0])
+    ):
+        overlaps_selected = any(
+            start < used_end and end > used_start
+            for used_start, used_end, _ in selected
+        )
+        if overlaps_selected:
+            continue
+        selected.append((start, end, term))
+    return _unique([term for _, _, term in sorted(selected)])
 
 
 def _parse_model_output(output: str | dict) -> dict:

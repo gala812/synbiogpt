@@ -12,7 +12,10 @@ from langchain_core.documents import Document
 from open_webui.apps.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.apps.retrieval.query_processor import ProcessedQuery
 from open_webui.apps.retrieval.synbio import RetrievalConfig, RetrievalPipeline
-from open_webui.apps.retrieval.synbio.evidence_gate import has_evidence_documents
+from open_webui.apps.retrieval.synbio.evidence_gate import (
+    gate_rejection_reason,
+    has_evidence_documents,
+)
 from open_webui.apps.retrieval.synbio.pipeline import (
     add_asset_urls,
 )
@@ -306,6 +309,7 @@ def _query_doc_with_opensearch_hybrid(
         "distances": [[d.metadata.get("score") for d in docs]],
         "documents": [[d.page_content for d in docs]],
         "metadatas": [[d.metadata for d in docs]],
+        "gate_diagnostics": run.gate_diagnostics,
     }
 
 
@@ -351,7 +355,7 @@ def query_doc_with_hybrid_search(
 
 def merge_and_sort_query_results(
     query_results: list[dict], k: int, reverse: bool = False
-) -> list[dict]:
+) -> dict:
     # Initialize lists to store combined data
     combined_distances = []
     combined_documents = []
@@ -387,12 +391,40 @@ def merge_and_sort_query_results(
         "distances": [sorted_distances],
         "documents": [sorted_documents],
         "metadatas": [sorted_metadatas],
+        "gate_diagnostics": _merge_gate_diagnostics(query_results),
     }
 
     return result
 
 
-def _recover_fulltext_context(result: dict, collection_names: list[str]) -> dict:
+def _merge_gate_diagnostics(results: list[dict]) -> dict:
+    diagnostics = {
+        "input_count": 0,
+        "output_count": 0,
+        "score_rejected_count": 0,
+        "exact_term_rejected_count": 0,
+        "exact_term_missing_terms": [],
+    }
+    missing_terms = []
+    for result in results:
+        current = result.get("gate_diagnostics") or {}
+        for key in (
+            "input_count",
+            "output_count",
+            "score_rejected_count",
+            "exact_term_rejected_count",
+        ):
+            diagnostics[key] += int(current.get(key) or 0)
+        missing_terms.extend(current.get("exact_term_missing_terms") or [])
+
+    diagnostics["exact_term_missing_terms"] = list(dict.fromkeys(missing_terms))
+    diagnostics["rejection_reason"] = gate_rejection_reason(diagnostics)
+    return diagnostics
+
+
+def _recover_fulltext_context(
+    result: dict, collection_names: list[str], *, include_assets: bool = True
+) -> dict:
     collection_name = next(
         (
             name
@@ -436,7 +468,7 @@ def _recover_fulltext_context(result: dict, collection_names: list[str]) -> dict
 
     asset_documents = []
     assets = None
-    if _RETRIEVAL_PIPELINE.config.asset_expansion_enabled:
+    if _RETRIEVAL_PIPELINE.config.asset_expansion_enabled and include_assets:
         asset_started = time.perf_counter()
         assets = _RETRIEVAL_PIPELINE.expand_assets(recovered.documents)
         asset_documents = assets.documents
@@ -470,6 +502,7 @@ def _recover_fulltext_context(result: dict, collection_names: list[str]) -> dict
         "distances": [[doc.metadata.get("score") for doc in output_documents]],
         "documents": [[doc.page_content for doc in output_documents]],
         "metadatas": [[doc.metadata for doc in output_documents]],
+        "gate_diagnostics": result.get("gate_diagnostics", {}),
     }
 
 
@@ -515,6 +548,7 @@ def query_collection_with_hybrid_search(
     k: int,
     reranking_function,
     r: float,
+    include_assets: bool = True,
 ) -> dict:
     results = []
     error = False
@@ -565,7 +599,9 @@ def query_collection_with_hybrid_search(
         )
 
     merged = merge_and_sort_query_results(results, k=k, reverse=True)
-    return _recover_fulltext_context(merged, collection_names)
+    return _recover_fulltext_context(
+        merged, collection_names, include_assets=include_assets
+    )
 
 
 def get_embedding_function(
@@ -607,6 +643,8 @@ def get_sources_from_files(
     reranking_function,
     r,
     hybrid_search,
+    include_assets: bool = True,
+    retrieval_diagnostics: dict | None = None,
 ):
     # ---------------- logs ----------------
     log.debug("======================= retrieval start =======================")
@@ -627,6 +665,7 @@ def get_sources_from_files(
 
     extracted_collections: list[str] = []
     relevant_contexts: list[dict] = []
+    observed_gate_diagnostics: list[dict] = []
 
     for idx, file in enumerate(files or [], 1):
         tf0 = time.perf_counter()
@@ -721,6 +760,7 @@ def get_sources_from_files(
                     k=k,
                     reranking_function=reranking_function,
                     r=r,
+                    include_assets=include_assets,
                 )
                 log.info(
                     "[TIMING] file[%d/%d] hybrid_search %.3fs collections=%d",
@@ -754,6 +794,9 @@ def get_sources_from_files(
                 context = None
 
         extracted_collections.extend(collection_names)
+
+        if context and context.get("gate_diagnostics"):
+            observed_gate_diagnostics.append(context)
 
         log.info(
             "[TIMING] file[%d/%d] total %.3fs",
@@ -794,6 +837,10 @@ def get_sources_from_files(
         time.perf_counter() - t0,
         len(sources),
     )
+    if retrieval_diagnostics is not None:
+        retrieval_diagnostics.update(
+            _merge_gate_diagnostics(observed_gate_diagnostics)
+        )
     return sources
 
 

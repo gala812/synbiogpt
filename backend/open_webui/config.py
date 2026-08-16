@@ -1033,7 +1033,7 @@ whether retrieval should run.
 
 ### Chat History:
 <chat_history>
-{{MESSAGES:END:6}}
+{{MESSAGES}}
 </chat_history>
 """
 

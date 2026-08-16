@@ -60,7 +60,8 @@ def test_english_query_needs_no_model_call():
 
     assert result.original_query == query
     assert result.semantic_query == query
-    assert result.exact_terms == ("CRISPRi",)
+    assert result.exact_terms == ("CRISPRi", "E. coli")
+    assert result.required_terms == ("CRISPRi", "E. coli")
     assert "CRISPR interference" in result.lexical_query
 
 
@@ -172,3 +173,51 @@ def test_scientific_follow_up_is_self_contained():
         "Why can CRISPRi improve succinate production in Escherichia coli?"
     )
     assert "succinate" in result.lexical_query
+
+
+def test_compound_entities_are_kept_whole_without_fragment_tokens():
+    query = "在 E. coli BL21(DE3) 中使用 pET-28a(+) 表达蛋白"
+
+    assert MODULE.extract_exact_terms(query) == [
+        "E. coli",
+        "BL21(DE3)",
+        "pET-28a(+)",
+    ]
+
+
+def test_inherited_entities_are_appended_but_not_made_mandatory():
+    processor = QueryProcessor()
+    result = processor.process_model_output(
+        "同时抑制 ppc 会有什么影响？",
+        {
+            "semantic_query": "How does ppc inhibition affect succinate production?",
+            "lexical_query": "ppc inhibition succinate production",
+        },
+        inherited_exact_terms=("ldhA",),
+    )
+
+    assert result.exact_terms == ("ppc", "ldhA")
+    assert result.required_terms == ("ppc",)
+    assert "ldhA" in result.semantic_query
+    assert "ldhA" in result.bm25_query
+
+
+def test_entity_only_fallback_keeps_original_query_and_context():
+    result = QueryProcessor().process_fallback(
+        "为什么？",
+        "Scientific literature about CRISPRi ldhA",
+        inherited_exact_terms=("CRISPRi", "ldhA"),
+    )
+
+    assert result.original_query == "为什么？"
+    assert result.semantic_query == "Scientific literature about CRISPRi ldhA"
+    assert result.exact_terms == ("CRISPRi", "ldhA")
+    assert result.required_terms == ()
+
+    continued = QueryProcessor().process_fallback(
+        "如果再使用 dCas9 呢？",
+        result.semantic_query,
+        inherited_exact_terms=result.exact_terms,
+    )
+    assert "dCas9" in continued.semantic_query
+    assert continued.required_terms == ("dCas9",)
