@@ -82,6 +82,37 @@ def test_plain_chat_route_flag_is_explicit():
 @pytest.mark.parametrize(
     "message",
     [
+        "当前是不是已经内置了知识库？",
+        "SynBioGPT是否接入全文文献知识库",
+        "你有知识库吗？",
+        "这个系统会使用知识库回答问题吗？",
+        "知识库是不是已经启用了？",
+        "Does SynBioGPT use a knowledge base?",
+    ],
+)
+def test_product_capability_questions_accept_high_confidence_paraphrases(message):
+    assert ROUTING.is_product_capability_question(message)
+    assert ROUTING.route_flags(message) == {"product_capability": True}
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "知识库里有没有CRISPRi相关论文？",
+        "请帮我检索知识库里的纤维素文献",
+        "知识库中收录了哪些丁二酸研究？",
+        "有没有关于BBa_J23100的论文？",
+        "CRISPRi如何提高丁二酸产量？",
+    ],
+)
+def test_product_capability_route_does_not_capture_research_queries(message):
+    assert not ROUTING.is_product_capability_question(message)
+    assert ROUTING.route_flags(message) == {}
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
         "你好，帮我查一下CRISPRi",
         "你好，请问CRISPRi是什么？",
         "谢谢，帮我查一下CRISPRi",
@@ -115,6 +146,15 @@ def test_plain_chat_prompt_guides_only_on_first_user_message():
     assert later_prompt == DIALOGUE.PLAIN_CHAT_SYSTEM_PROMPT_NO_GUIDE
     assert "引导" in first_prompt
     assert "引导" not in later_prompt
+
+
+def test_product_capability_prompt_states_project_facts():
+    prompt = DIALOGUE.get_product_capability_prompt()
+
+    assert prompt == DIALOGUE.PRODUCT_CAPABILITY_SYSTEM_PROMPT
+    assert "全文文献知识库" in prompt
+    assert "MedCPT" in prompt
+    assert "BM25" in prompt
 
 
 def test_first_user_message_is_shared_with_prompt_selection():

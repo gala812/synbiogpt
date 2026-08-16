@@ -77,14 +77,6 @@ class Reranker:
         return [2.0 if "B" in text else 1.0 for text in documents]
 
 
-def test_evidence_gate_has_no_uncalibrated_default_threshold(monkeypatch):
-    monkeypatch.delenv("MEDCPT_EVIDENCE_GATE_MIN_SCORE", raising=False)
-    assert RetrievalConfig.from_env().evidence_gate_min_score is None
-
-    monkeypatch.setenv("MEDCPT_EVIDENCE_GATE_MIN_SCORE", "1.25")
-    assert RetrievalConfig.from_env().evidence_gate_min_score == 1.25
-
-
 def test_exact_term_gate_env_switch_defaults_on(monkeypatch):
     monkeypatch.delenv("MEDCPT_EXACT_TERM_GATE_ENABLED", raising=False)
     assert RetrievalConfig.from_env().exact_term_gate_enabled is True
@@ -93,26 +85,19 @@ def test_exact_term_gate_env_switch_defaults_on(monkeypatch):
     assert RetrievalConfig.from_env().exact_term_gate_enabled is False
 
 
-def test_gate_rejection_reason_distinguishes_empty_score_exact_and_mixed():
+def test_gate_rejection_reason_reports_only_exact_term_rejection():
     base = {
         "input_count": 2,
         "output_count": 0,
-        "score_rejected_count": 0,
         "exact_term_rejected_count": 0,
     }
 
     assert EVIDENCE_GATE.gate_rejection_reason(base) is None
     assert EVIDENCE_GATE.gate_rejection_reason(
-        {**base, "score_rejected_count": 2}
-    ) == "score"
-    assert EVIDENCE_GATE.gate_rejection_reason(
         {**base, "exact_term_rejected_count": 2}
     ) == "exact_term"
     assert EVIDENCE_GATE.gate_rejection_reason(
-        {**base, "score_rejected_count": 1, "exact_term_rejected_count": 1}
-    ) == "score_and_exact_term"
-    assert EVIDENCE_GATE.gate_rejection_reason(
-        {**base, "output_count": 1, "score_rejected_count": 1}
+        {**base, "output_count": 1, "exact_term_rejected_count": 1}
     ) is None
 
 
@@ -142,13 +127,9 @@ def test_formal_pipeline_preserves_hybrid_order_and_metadata():
     assert result.reranked_documents[0].metadata["rerank_rank"] == 1
 
 
-def test_evidence_gate_can_return_zero_without_changing_hybrid_or_reranking():
+def test_cross_encoder_raw_scores_rank_but_do_not_filter_evidence():
     pipeline = RetrievalPipeline(
-        RetrievalConfig(
-            candidate_limit=10,
-            cross_encoder_top_k=2,
-            evidence_gate_min_score=2.1,
-        )
+        RetrievalConfig(candidate_limit=10, cross_encoder_top_k=2)
     )
     query = ProcessedQuery(
         "succinate production",
@@ -171,11 +152,13 @@ def test_evidence_gate_can_return_zero_without_changing_hybrid_or_reranking():
     )
 
     assert [item.chunk_id for item in result.fused_candidates] == ["B", "A"]
-    assert result.reranked_documents == []
+    assert [doc.metadata["chunk_id"] for doc in result.reranked_documents] == [
+        "B",
+        "A",
+    ]
     assert result.timings["rerank_seconds"] >= 0
     assert result.timings["evidence_gate_seconds"] >= 0
-    assert result.gate_diagnostics["rejection_reason"] == "score"
-    assert result.gate_diagnostics["score_rejected_count"] == 2
+    assert result.gate_diagnostics["rejection_reason"] is None
     assert not EVIDENCE_GATE.has_evidence_documents({"documents": [[]]})
 
 

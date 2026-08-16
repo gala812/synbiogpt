@@ -1,4 +1,4 @@
-"""Post-rerank evidence filtering without assuming a calibrated score cutoff."""
+"""Protect exact scientific identifiers after reranking."""
 
 from __future__ import annotations
 
@@ -6,12 +6,6 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceGateResult:
-    documents: list[Any]
-    rejected_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,13 +21,10 @@ def gate_rejection_reason(diagnostics: Mapping[str, Any] | None) -> str | None:
     diagnostics = diagnostics or {}
     input_count = int(diagnostics.get("input_count") or 0)
     output_count = int(diagnostics.get("output_count") or 0)
-    score_rejected = int(diagnostics.get("score_rejected_count") or 0)
     exact_rejected = int(diagnostics.get("exact_term_rejected_count") or 0)
-    if input_count <= 0 or output_count > 0 or score_rejected + exact_rejected <= 0:
+    if input_count <= 0 or output_count > 0 or exact_rejected <= 0:
         return None
-    if score_rejected and exact_rejected:
-        return "score_and_exact_term"
-    return "score" if score_rejected else "exact_term"
+    return "exact_term"
 
 
 def has_evidence_documents(context: Mapping[str, Any] | None) -> bool:
@@ -42,36 +33,6 @@ def has_evidence_documents(context: Mapping[str, Any] | None) -> bool:
     if not context:
         return False
     return any(bool(group) for group in (context.get("documents") or []))
-
-
-def apply_evidence_gate(
-    documents: Sequence[Any],
-    *,
-    min_cross_encoder_score: float | None,
-) -> EvidenceGateResult:
-    """Filter reranked evidence when a calibrated raw-logit cutoff is configured.
-
-    The default cutoff is ``None``, so current raw MedCPT logits are not assigned
-    an arbitrary meaning. Once configured from calibration data, the gate may
-    legitimately reject every candidate.
-    """
-
-    candidates = list(documents)
-    if min_cross_encoder_score is None:
-        return EvidenceGateResult(candidates, 0)
-
-    accepted = []
-    for document in candidates:
-        metadata = getattr(document, "metadata", {}) or {}
-        score = metadata.get("cross_encoder_score")
-        try:
-            is_reliable = float(score) >= min_cross_encoder_score
-        except (TypeError, ValueError):
-            is_reliable = False
-        if is_reliable:
-            accepted.append(document)
-
-    return EvidenceGateResult(accepted, len(candidates) - len(accepted))
 
 
 def _document_text(document: Any) -> str:

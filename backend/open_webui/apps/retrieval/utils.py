@@ -401,7 +401,6 @@ def _merge_gate_diagnostics(results: list[dict]) -> dict:
     diagnostics = {
         "input_count": 0,
         "output_count": 0,
-        "score_rejected_count": 0,
         "exact_term_rejected_count": 0,
         "exact_term_missing_terms": [],
     }
@@ -411,7 +410,6 @@ def _merge_gate_diagnostics(results: list[dict]) -> dict:
         for key in (
             "input_count",
             "output_count",
-            "score_rejected_count",
             "exact_term_rejected_count",
         ):
             diagnostics[key] += int(current.get(key) or 0)

@@ -10,11 +10,6 @@ def _enabled(name: str, default: str) -> bool:
     return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
 
 
-def _optional_float(name: str) -> float | None:
-    value = os.getenv(name, "").strip()
-    return float(value) if value else None
-
-
 @dataclass(frozen=True, slots=True)
 class RetrievalConfig:
     """One immutable snapshot of the current retrieval environment."""
@@ -28,7 +23,6 @@ class RetrievalConfig:
     dense_weight: float = 1.0
     bm25_weight: float = 1.0
     cross_encoder_top_k: int = 10
-    evidence_gate_min_score: float | None = None
     exact_term_gate_enabled: bool = True
     context_recovery_enabled: bool = True
     context_token_budget: int = 12_000
@@ -65,9 +59,6 @@ class RetrievalConfig:
             bm25_weight=float(os.getenv("RAG_HYBRID_BM25_WEIGHT", "1.0")),
             cross_encoder_top_k=max(
                 1, int(os.getenv("MEDCPT_CROSS_ENCODER_TOP_K", "10"))
-            ),
-            evidence_gate_min_score=_optional_float(
-                "MEDCPT_EVIDENCE_GATE_MIN_SCORE"
             ),
             exact_term_gate_enabled=_enabled(
                 "MEDCPT_EXACT_TERM_GATE_ENABLED", "true"

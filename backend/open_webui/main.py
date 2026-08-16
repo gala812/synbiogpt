@@ -69,6 +69,7 @@ from open_webui.apps.retrieval.synbio.dialogue import (
     get_no_evidence_mode,
     get_no_evidence_prompt,
     get_plain_chat_prompt,
+    get_product_capability_prompt,
     is_first_user_message,
 )
 from open_webui.apps.retrieval.synbio.hooks import (
@@ -78,6 +79,7 @@ from open_webui.apps.retrieval.synbio.hooks import (
 from open_webui.apps.retrieval.synbio.routing import (
     add_default_knowledge,
     is_explicit_plain_chat,
+    is_product_capability_question,
     requests_visual_evidence,
 )
 from open_webui.apps.retrieval.utils import get_sources_from_files
@@ -562,6 +564,9 @@ async def chat_completion_files_handler(
 
     metadata = body.get("metadata", {})
     original_query = get_last_user_message(body["messages"]) or ""
+    if original_query and is_product_capability_question(original_query):
+        log.info("[PERF] rag.route route=product_capability sources=0")
+        return body, {"sources": sources, "product_capability": True}
     if original_query and is_explicit_plain_chat(original_query):
         log.info("[PERF] rag.route route=plain_chat sources=0")
         return body, {"sources": sources, "plain_chat": True}
@@ -696,15 +701,14 @@ async def chat_completion_files_handler(
         )
         gate_input_count = int(retrieval_diagnostics.get("input_count") or 0)
         gate_rejected_count = int(
-            retrieval_diagnostics.get("score_rejected_count") or 0
-        ) + int(retrieval_diagnostics.get("exact_term_rejected_count") or 0)
+            retrieval_diagnostics.get("exact_term_rejected_count") or 0
+        )
         log.info(
             "[EVIDENCE_GATE_REQUEST] candidates=%d rejected=%d rate=%.4f "
-            "score_rejected=%d exact_term_rejected=%d reason=%s",
+            "exact_term_rejected=%d reason=%s",
             gate_input_count,
             gate_rejected_count,
             gate_rejected_count / gate_input_count if gate_input_count else 0.0,
-            int(retrieval_diagnostics.get("score_rejected_count") or 0),
             int(retrieval_diagnostics.get("exact_term_rejected_count") or 0),
             retrieval_diagnostics.get("rejection_reason"),
         )
@@ -868,7 +872,26 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             log.exception(e)
 
-        if file_flags.get("plain_chat"):
+        if file_flags.get("product_capability"):
+            if sources:
+                log.warning(
+                    "Product-capability route ignored %d source groups produced by tools",
+                    len(sources),
+                )
+                sources = []
+            capability_prompt = get_product_capability_prompt()
+            if model["owned_by"] == "ollama":
+                body["messages"] = prepend_to_first_user_message_content(
+                    capability_prompt,
+                    body["messages"],
+                )
+            else:
+                body["messages"] = add_or_update_system_message(
+                    capability_prompt,
+                    body["messages"],
+                )
+            log.info("[PERF] rag.route route=product_capability sources=0")
+        elif file_flags.get("plain_chat"):
             if sources:
                 log.warning(
                     "Plain-chat route ignored %d source groups produced by tools",

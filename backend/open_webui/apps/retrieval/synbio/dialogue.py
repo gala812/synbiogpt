@@ -17,6 +17,14 @@ PLAIN_CHAT_SYSTEM_PROMPT_NO_GUIDE = (
     "被问到身份或能力时，请如实介绍你支持全文文献检索、图表证据和多模型后端。"
 )
 
+PRODUCT_CAPABILITY_SYSTEM_PROMPT = (
+    "你是 SynBioGPT，合成生物学科研问答助手。用户正在询问系统自身的知识库或检索能力。"
+    "请用中文直接、简短地说明：SynBioGPT 默认接入全文文献知识库，使用 MedCPT Dense 与 BM25 召回、"
+    "RRF 融合和 MedCPT Cross Encoder 重排，并可返回正文及图表证据；基座模型根据检索证据生成回答。"
+    "不要把基座模型的训练知识说成 SynBioGPT 的内置知识库，不要检索或编造论文。"
+    "根据用户的具体问法回答 1-3 句，不使用 Markdown 标题。"
+)
+
 NO_EVIDENCE_SYSTEM_PROMPT = (
     "你刚检索了内置全文文献知识库，但没有获得足够相关的证据。"
     "你可以基于自身通用知识回答，但必须明确区分“通用知识或推测”与"
@@ -53,6 +61,12 @@ def get_plain_chat_prompt(messages) -> str:
     if is_first_user_message(messages):
         return PLAIN_CHAT_SYSTEM_PROMPT
     return PLAIN_CHAT_SYSTEM_PROMPT_NO_GUIDE
+
+
+def get_product_capability_prompt() -> str:
+    """返回系统知识库与检索能力的固定事实提示词。"""
+
+    return PRODUCT_CAPABILITY_SYSTEM_PROMPT
 
 
 def get_no_evidence_prompt(mode: str) -> str:

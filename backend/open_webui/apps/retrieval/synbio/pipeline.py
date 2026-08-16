@@ -32,7 +32,6 @@ from open_webui.apps.retrieval.search.rrf import (
 
 from .config import RetrievalConfig
 from .evidence_gate import (
-    apply_evidence_gate,
     apply_exact_term_gate,
     gate_rejection_reason,
 )
@@ -379,7 +378,6 @@ class RetrievalPipeline:
         gate_diagnostics: dict[str, Any] = {
             "input_count": 0,
             "output_count": 0,
-            "score_rejected_count": 0,
             "exact_term_rejected_count": 0,
             "exact_term_missing_terms": [],
             "rejection_reason": None,
@@ -402,34 +400,22 @@ class RetrievalPipeline:
             )
             timings["rerank_seconds"] = time.perf_counter() - started
             started = time.perf_counter()
-            evidence_gate_min_score = (
-                self.config.evidence_gate_min_score
-                if getattr(selected_reranker, "uses_raw_logits", False)
-                else None
-            )
-            gated = apply_evidence_gate(
-                reranked,
-                min_cross_encoder_score=evidence_gate_min_score,
-            )
             exact_term_rejected_count = 0
             exact_term_missing_terms: tuple[str, ...] = ()
             if self.config.exact_term_gate_enabled:
                 exact_term_gated = apply_exact_term_gate(
-                    gated.documents,
+                    reranked,
                     required_terms=processed.required_terms,
                 )
                 reranked = exact_term_gated.documents
                 exact_term_rejected_count = exact_term_gated.rejected_count
                 exact_term_missing_terms = exact_term_gated.missing_terms
             else:
-                reranked = gated.documents
+                reranked = list(reranked)
 
             gate_diagnostics = {
-                "input_count": len(reranked)
-                + gated.rejected_count
-                + exact_term_rejected_count,
+                "input_count": len(reranked) + exact_term_rejected_count,
                 "output_count": len(reranked),
-                "score_rejected_count": gated.rejected_count,
                 "exact_term_rejected_count": exact_term_rejected_count,
                 "exact_term_missing_terms": list(exact_term_missing_terms),
             }
@@ -438,16 +424,14 @@ class RetrievalPipeline:
             )
             timings["evidence_gate_seconds"] = time.perf_counter() - started
             log.info(
-                "[EVIDENCE_GATE] candidates=%d accepted=%d rejected=%d "
+                "[EVIDENCE_GATE] candidates=%d accepted=%d "
                 "exact_term_rejected=%d missing_terms=%s reason=%s "
-                "threshold_configured=%s exact_term_gate_enabled=%s",
+                "exact_term_gate_enabled=%s",
                 gate_diagnostics["input_count"],
                 len(reranked),
-                gated.rejected_count,
                 exact_term_rejected_count,
                 list(exact_term_missing_terms),
                 gate_diagnostics["rejection_reason"],
-                evidence_gate_min_score is not None,
                 self.config.exact_term_gate_enabled,
             )
         return RetrievalRun(
