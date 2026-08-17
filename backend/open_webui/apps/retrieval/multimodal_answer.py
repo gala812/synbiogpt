@@ -5,6 +5,77 @@ from __future__ import annotations
 from typing import Any
 
 
+MAX_USER_IMAGES = 4
+IMAGE_ONLY_QUERY_TEXT = "Analyze the current user image."
+
+
+def current_user_image_items(
+    messages: list[dict[str, Any]], *, max_images: int = MAX_USER_IMAGES
+) -> list[dict[str, Any]]:
+    """Return only image inputs attached to the latest user turn."""
+
+    if max_images < 1:
+        return []
+    for message in reversed(messages or []):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            return []
+        return [
+            item
+            for item in content
+            if isinstance(item, dict)
+            and item.get("type") == "image_url"
+            and _image_url(item)
+        ][:max_images]
+    return []
+
+
+def retain_current_user_images(
+    messages: list[dict[str, Any]], *, max_images: int = MAX_USER_IMAGES
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop historical images and cap images on the latest user turn."""
+
+    latest_user_index = next(
+        (
+            index
+            for index in range(len(messages or []) - 1, -1, -1)
+            if messages[index].get("role") == "user"
+        ),
+        None,
+    )
+    kept = 0
+    for index, message in enumerate(messages or []):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        filtered = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "image_url":
+                filtered.append(item)
+                continue
+            if index == latest_user_index and kept < max_images and _image_url(item):
+                filtered.append(item)
+                kept += 1
+        message["content"] = filtered
+    return messages, kept
+
+
+def build_query_generation_content(
+    prompt: str,
+    messages: list[dict[str, Any]],
+    *,
+    max_images: int = MAX_USER_IMAGES,
+) -> str | list[dict[str, Any]]:
+    """Attach current-turn images while preserving the pure-text payload shape."""
+
+    images = current_user_image_items(messages, max_images=max_images)
+    if not images:
+        return prompt
+    return [{"type": "text", "text": prompt}, *images]
+
+
 def collect_retrieval_image_urls(
     sources: list[dict[str, Any]], *, max_images: int = 16
 ) -> list[str]:

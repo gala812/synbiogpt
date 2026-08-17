@@ -877,7 +877,7 @@
 			selectedModels = _selectedModels;
 		}
 
-		if (userPrompt === '') {
+		if (userPrompt === '' && !files.some((file: any) => file.type === 'image')) {
 			toast.error($i18n.t('Please enter a prompt'));
 			return;
 		}
@@ -1144,7 +1144,10 @@
 				: undefined,
 			...createMessagesList(responseMessageId)
 		]
-			.filter((message) => message?.content?.trim())
+			.filter(
+				(message) =>
+					message?.content?.trim() || message.files?.some((file: any) => file.type === 'image')
+			)
 			.map((message) => {
 				// Prepare the base message object
 				const baseMessage = {
@@ -1616,7 +1619,11 @@
 							: undefined,
 						...createMessagesList(responseMessageId)
 					]
-						.filter((message) => message?.content?.trim())
+						.filter(
+							(message) =>
+								message?.content?.trim() ||
+								message.files?.some((file: any) => file.type === 'image')
+						)
 						.map((message, idx, arr) => ({
 							role: message.role,
 							...((message.files?.filter((file) => file.type === 'image').length > 0 ?? false) &&

@@ -293,6 +293,54 @@ def test_webui_hooks_preserve_query_and_multimodal_message_shapes():
     }
 
 
+def test_query_protection_preserves_current_user_image_content():
+    pipeline = RetrievalPipeline()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Explain ldhA"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,abc"},
+                },
+            ],
+        }
+    ]
+
+    protected = HOOKS.protect_query_messages(messages, "Explain ldhA", pipeline)
+
+    assert messages[0]["content"][0]["text"] == "Explain ldhA"
+    assert protected[0]["content"][0]["text"] == "Explain ZXQENTITY0QXZ"
+    assert protected[0]["content"][1] == messages[0]["content"][1]
+
+
+def test_user_image_does_not_consume_retrieved_image_budget():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Explain this figure"},
+                {"type": "image_url", "image_url": {"url": "http://user"}},
+            ],
+        }
+    ]
+
+    prepared, image_urls, injected = HOOKS.prepare_multimodal_messages(
+        messages,
+        [{"metadata": [{"image_urls": ["http://paper"]}]}],
+        max_images=1,
+        add_system_message=lambda prompt, values: [
+            {"role": "system", "content": prompt},
+            *values,
+        ],
+    )
+
+    assert image_urls == ["http://paper"]
+    assert injected == 1
+    assert prepared[-1]["content"][-1]["image_url"]["url"] == "http://paper"
+
+
 def test_exact_term_gate_rejects_similarly_spelled_substitutes():
     documents = [
         Document(

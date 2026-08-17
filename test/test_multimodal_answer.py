@@ -100,6 +100,77 @@ def test_preserves_existing_content_and_deduplicates_images():
     assert messages[0]["content"][-1]["image_url"]["url"] == "http://assets/b"
 
 
+def test_query_generation_uses_only_current_turn_images_with_limit():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "old"},
+                {"type": "image_url", "image_url": {"url": "data:image/png,old"}},
+            ],
+        },
+        {"role": "assistant", "content": "answer"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "current"},
+                *[
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png,{index}"},
+                    }
+                    for index in range(5)
+                ],
+            ],
+        },
+    ]
+
+    content = MODULE.build_query_generation_content(
+        "query prompt", messages, max_images=4
+    )
+
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "query prompt"}
+    assert len(content) == 5
+    assert all("old" not in item["image_url"]["url"] for item in content[1:])
+
+
+def test_retains_only_capped_images_from_latest_user_turn():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "old"},
+                {"type": "image_url", "image_url": {"url": "http://old"}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "current"},
+                {"type": "image_url", "image_url": {"url": "http://one"}},
+                {"type": "image_url", "image_url": {"url": "http://two"}},
+                {"type": "image_url", "image_url": {"url": "http://three"}},
+            ],
+        },
+    ]
+
+    retained, count = MODULE.retain_current_user_images(messages, max_images=2)
+
+    assert count == 2
+    assert retained[0]["content"] == [{"type": "text", "text": "old"}]
+    assert len(retained[1]["content"]) == 3
+
+
+def test_pure_text_query_generation_shape_is_unchanged():
+    messages = [{"role": "user", "content": "ldhA deletion"}]
+
+    assert (
+        MODULE.build_query_generation_content("query prompt", messages)
+        == "query prompt"
+    )
+
+
 def test_does_not_change_messages_without_retrieved_images():
     messages = [{"role": "user", "content": "没有图片的查询"}]
 

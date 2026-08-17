@@ -7,7 +7,9 @@ from collections.abc import Callable
 from typing import Any
 
 from open_webui.apps.retrieval.multimodal_answer import (
+    MAX_USER_IMAGES,
     collect_retrieval_image_urls,
+    current_user_image_items,
     inject_images_into_last_user_message,
 )
 from open_webui.apps.retrieval.prompts import MULTIMODAL_EVIDENCE_SYSTEM_PROMPT
@@ -26,7 +28,18 @@ def protect_query_messages(
     prepared = copy.deepcopy(messages)
     for message in reversed(prepared):
         if message.get("role") == "user":
-            message["content"] = protected
+            content = message.get("content")
+            if isinstance(content, list):
+                replaced = False
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        item["text"] = protected
+                        replaced = True
+                        break
+                if not replaced:
+                    content.insert(0, {"type": "text", "text": protected})
+            else:
+                message["content"] = protected
             break
     return prepared
 
@@ -42,7 +55,12 @@ def prepare_multimodal_messages(
 
     prepared = add_system_message(MULTIMODAL_EVIDENCE_SYSTEM_PROMPT, messages)
     image_urls = collect_retrieval_image_urls(sources, max_images=max_images)
+    user_image_count = len(
+        current_user_image_items(prepared, max_images=MAX_USER_IMAGES)
+    )
     injected = inject_images_into_last_user_message(
-        prepared, image_urls, max_images=max_images
+        prepared,
+        image_urls,
+        max_images=max_images + user_image_count,
     )
     return prepared, image_urls, injected

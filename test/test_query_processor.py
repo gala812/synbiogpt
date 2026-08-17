@@ -121,6 +121,54 @@ def test_json_is_extracted_from_qwen_reasoning_wrapper():
     assert "succinic acid" in result.lexical_query
 
 
+def test_multimodal_model_can_skip_retrieval_without_queries():
+    result = QueryProcessor().process_model_output(
+        "Analyze the current user image.",
+        {
+            "semantic_query": "",
+            "lexical_query": "",
+            "exact_terms": [],
+            "needs_retrieval": False,
+        },
+        allow_no_retrieval=True,
+    )
+
+    assert result.needs_retrieval is False
+    assert result.semantic_query == ""
+    assert result.lexical_query == ""
+
+
+def test_image_inferred_entities_are_not_promoted_to_exact_terms():
+    result = QueryProcessor().process_model_output(
+        "Explain the pathway shown in the image",
+        {
+            "semantic_query": "How does ldhA affect succinate production?",
+            "lexical_query": "ldhA succinate metabolic pathway",
+            "exact_terms": ["ldhA"],
+            "needs_retrieval": True,
+        },
+    )
+
+    assert result.needs_retrieval is True
+    assert result.exact_terms == ()
+    assert result.required_terms == ()
+
+
+def test_pure_text_processing_cannot_disable_retrieval():
+    result = QueryProcessor().process_model_output(
+        "Explain CRISPRi",
+        {
+            "semantic_query": "How does CRISPRi regulate gene expression?",
+            "lexical_query": "CRISPRi gene expression regulation",
+            "exact_terms": ["CRISPRi"],
+            "needs_retrieval": False,
+        },
+    )
+
+    assert result.needs_retrieval is True
+    assert result.semantic_query == "How does CRISPRi regulate gene expression?"
+
+
 def test_legacy_chat_route_cannot_disable_retrieval_query():
     result = QueryProcessor().process_model_output(
         "你好",

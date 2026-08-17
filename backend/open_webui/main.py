@@ -49,7 +49,14 @@ from open_webui.apps.openai.main import (
     get_all_models_responses as get_openai_models_responses,
 )
 from open_webui.apps.retrieval.main import app as retrieval_app
-from open_webui.apps.retrieval.multimodal_answer import build_retrieval_image_files
+from open_webui.apps.retrieval.multimodal_answer import (
+    IMAGE_ONLY_QUERY_TEXT,
+    MAX_USER_IMAGES,
+    build_query_generation_content,
+    build_retrieval_image_files,
+    retain_current_user_images,
+)
+from open_webui.apps.retrieval.prompts import USER_IMAGE_SYSTEM_PROMPT
 from open_webui.apps.retrieval.synbio import RetrievalPipeline
 from open_webui.apps.retrieval.synbio.citations import (
     build_citation_sources,
@@ -563,13 +570,33 @@ async def chat_completion_files_handler(
     sources = []
 
     metadata = body.get("metadata", {})
+    body["messages"], user_image_count = retain_current_user_images(
+        body["messages"], max_images=MAX_USER_IMAGES
+    )
     original_query = get_last_user_message(body["messages"]) or ""
-    if original_query and is_product_capability_question(original_query):
+    query_input = original_query or IMAGE_ONLY_QUERY_TEXT
+    if (
+        not user_image_count
+        and original_query
+        and is_product_capability_question(original_query)
+    ):
         log.info("[PERF] rag.route route=product_capability sources=0")
-        return body, {"sources": sources, "product_capability": True}
-    if original_query and is_explicit_plain_chat(original_query):
+        return body, {
+            "sources": sources,
+            "product_capability": True,
+            "user_image_count": user_image_count,
+        }
+    if (
+        not user_image_count
+        and original_query
+        and is_explicit_plain_chat(original_query)
+    ):
         log.info("[PERF] rag.route route=plain_chat sources=0")
-        return body, {"sources": sources, "plain_chat": True}
+        return body, {
+            "sources": sources,
+            "plain_chat": True,
+            "user_image_count": user_image_count,
+        }
 
     files = add_default_knowledge(
         metadata.get("files"),
@@ -605,10 +632,21 @@ async def chat_completion_files_handler(
             )
             generated = queries_response["choices"][0]["message"]["content"]
             processed_query = SYNBIO_RETRIEVAL.process_generated_query(
-                original_query,
+                query_input,
                 generated,
                 inherited_exact_terms=inherited_terms,
+                allow_no_retrieval=bool(user_image_count),
             )
+            if user_image_count and not processed_query.needs_retrieval:
+                log.info(
+                    "[PERF] rag.route route=multimodal_direct sources=0 images=%d",
+                    user_image_count,
+                )
+                return body, {
+                    "sources": sources,
+                    "direct_multimodal": True,
+                    "user_image_count": user_image_count,
+                }
             queries = [processed_query]
         except Exception:
             log.info(
@@ -616,6 +654,17 @@ async def chat_completion_files_handler(
                 time.perf_counter() - tq0 if "tq0" in locals() else 0,
             )
             queries = []
+
+        if not queries and user_image_count and not original_query:
+            log.warning(
+                "Multimodal query generation failed for an image-only turn; "
+                "falling back to direct visual answer"
+            )
+            return body, {
+                "sources": sources,
+                "direct_multimodal": True,
+                "user_image_count": user_image_count,
+            }
 
         if len(queries) == 0:
             fallback_terms = inherited_terms
@@ -631,16 +680,16 @@ async def chat_completion_files_handler(
                 fallback_source = "previous_query"
             else:
                 try:
-                    queries = [SYNBIO_RETRIEVAL.process_query(original_query)]
+                    queries = [SYNBIO_RETRIEVAL.process_query(query_input)]
                 except Exception:
                     fallback = fallback_semantic_query(
-                        original_query, fallback_terms
+                        query_input, fallback_terms
                     )
 
             if not queries and fallback:
                 queries = [
                     SYNBIO_RETRIEVAL.process_fallback_query(
-                        original_query,
+                        query_input,
                         fallback,
                         inherited_exact_terms=fallback_terms,
                     )
@@ -662,6 +711,7 @@ async def chat_completion_files_handler(
                 "sources": sources,
                 "no_evidence": True,
                 "no_evidence_reason": "query_generation_failed",
+                "user_image_count": user_image_count,
             }
 
         no_evidence_reason = None
@@ -731,8 +781,9 @@ async def chat_completion_files_handler(
                 "gate_rejected_reason": retrieval_diagnostics.get(
                     "rejection_reason"
                 ),
+                "user_image_count": user_image_count,
             }
-    return body, {"sources": sources}
+    return body, {"sources": sources, "user_image_count": user_image_count}
 
 
 def is_chat_completion_request(request):
@@ -936,6 +987,22 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                 mode,
                 file_flags.get("no_evidence_reason"),
                 file_flags.get("gate_rejected_reason"),
+            )
+
+        if file_flags.get("user_image_count"):
+            if model["owned_by"] == "ollama":
+                body["messages"] = prepend_to_first_user_message_content(
+                    USER_IMAGE_SYSTEM_PROMPT,
+                    body["messages"],
+                )
+            else:
+                body["messages"] = add_or_update_system_message(
+                    USER_IMAGE_SYSTEM_PROMPT,
+                    body["messages"],
+                )
+            log.info(
+                "[MULTIMODAL-USER] current_turn_images=%d",
+                file_flags["user_image_count"],
             )
 
         citation_sources = build_citation_sources(sources)
@@ -2309,7 +2376,7 @@ async def generate_queries(form_data: dict, user=Depends(get_verified_user)):
     messages = form_data["messages"]
     if type == "retrieval":
         template = DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE
-        original_query = get_last_user_message(messages)
+        original_query = get_last_user_message(messages) or IMAGE_ONLY_QUERY_TEXT
         messages = protect_query_messages(
             messages, original_query, SYNBIO_RETRIEVAL
         )
@@ -2319,6 +2386,12 @@ async def generate_queries(form_data: dict, user=Depends(get_verified_user)):
         template = DEFAULT_QUERY_GENERATION_PROMPT_TEMPLATE
 
     content = query_generation_template(template, messages, {"name": user.name})
+    if type == "retrieval":
+        content = build_query_generation_content(
+            content,
+            messages,
+            max_images=MAX_USER_IMAGES,
+        )
 
     payload = {
         "model": task_model_id,

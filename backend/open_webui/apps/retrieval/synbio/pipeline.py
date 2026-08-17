@@ -175,11 +175,14 @@ class RetrievalPipeline:
         query: str,
         model_output: str | dict,
         inherited_exact_terms: tuple[str, ...] = (),
+        *,
+        allow_no_retrieval: bool = False,
     ) -> ProcessedQuery:
         return self.query_processor.process_model_output(
             query,
             model_output,
             inherited_exact_terms=inherited_exact_terms,
+            allow_no_retrieval=allow_no_retrieval,
         )
 
     def process_fallback_query(

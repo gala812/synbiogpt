@@ -68,6 +68,7 @@ class ProcessedQuery:
     lexical_query: str
     exact_terms: tuple[str, ...]
     required_terms: tuple[str, ...] = ()
+    needs_retrieval: bool = True
 
     @property
     def bm25_query(self) -> str:
@@ -108,11 +109,26 @@ class QueryProcessor:
         query: str,
         model_output: str | dict,
         inherited_exact_terms: tuple[str, ...] = (),
+        *,
+        allow_no_retrieval: bool = False,
     ) -> ProcessedQuery:
         """Validate the first base-model call and restore protected entities."""
 
         preparation = self.prepare(query)
         data = _parse_model_output(model_output)
+        needs_retrieval = not (
+            allow_no_retrieval and data.get("needs_retrieval") is False
+        )
+        if not needs_retrieval:
+            return ProcessedQuery(
+                original_query=preparation.original_query,
+                semantic_query="",
+                lexical_query="",
+                exact_terms=preparation.exact_terms,
+                required_terms=preparation.exact_terms,
+                needs_retrieval=False,
+            )
+
         semantic = data.get("semantic_query")
         if not semantic and isinstance(data.get("queries"), list):
             semantic = next((item for item in data["queries"] if item), "")
@@ -136,6 +152,7 @@ class QueryProcessor:
             semantic,
             lexical,
             inherited_exact_terms=inherited_exact_terms,
+            needs_retrieval=needs_retrieval,
         )
 
     def process_fallback(
@@ -165,6 +182,7 @@ class QueryProcessor:
         lexical: str,
         *,
         inherited_exact_terms: tuple[str, ...] = (),
+        needs_retrieval: bool = True,
     ) -> ProcessedQuery:
         inherited = _unique(list(inherited_exact_terms))
         semantic = _append_missing(semantic, inherited)
@@ -180,6 +198,7 @@ class QueryProcessor:
             lexical_query=lexical,
             exact_terms=tuple(exact_terms),
             required_terms=preparation.exact_terms,
+            needs_retrieval=needs_retrieval,
         )
 
 

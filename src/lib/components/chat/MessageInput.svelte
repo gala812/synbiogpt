@@ -56,6 +56,8 @@
 
 	export let prompt = '';
 	export let files = [];
+	const MAX_USER_IMAGES = 4;
+	$: hasImageInput = files.some((file: any) => file.type === 'image');
 
 	export let selectedToolIds = [];
 	export let webSearchEnabled = false;
@@ -79,6 +81,14 @@
 	$: visionCapableModels = [...(atSelectedModel ? [atSelectedModel] : selectedModels)].filter(
 		(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.vision ?? true
 	);
+
+	const addUserImage = (url: string) => {
+		if (files.filter((file: any) => file.type === 'image').length >= MAX_USER_IMAGES) {
+			toast.error($i18n.t('You can attach up to 4 images per message'));
+			return;
+		}
+		files = [...files, { type: 'image', url }];
+	};
 
 	const scrollToBottom = () => {
 		const element = document.getElementById('messages-container');
@@ -182,13 +192,7 @@
 				}
 				let reader = new FileReader();
 				reader.onload = (event) => {
-					files = [
-						...files,
-						{
-							type: 'image',
-							url: `${event.target.result}`
-						}
-					];
+					addUserImage(`${event.target.result}`);
 				};
 				reader.readAsDataURL(file);
 			} else {
@@ -721,7 +725,11 @@
 															}
 
 															// Submit the prompt when Enter key is pressed
-															if (prompt !== '' && e.keyCode === 13 && !e.shiftKey) {
+															if (
+																(prompt !== '' || hasImageInput) &&
+																e.keyCode === 13 &&
+																!e.shiftKey
+															) {
 																dispatch('submit', prompt);
 															}
 														}
@@ -747,13 +755,7 @@
 																const reader = new FileReader();
 
 																reader.onload = function (e) {
-																	files = [
-																		...files,
-																		{
-																			type: 'image',
-																			url: `${e.target.result}`
-																		}
-																	];
+																	addUserImage(`${e.target.result}`);
 																};
 
 																reader.readAsDataURL(blob);
@@ -799,7 +801,11 @@
 													}
 
 													// Submit the prompt when Enter key is pressed
-													if (prompt !== '' && e.key === 'Enter' && !e.shiftKey) {
+													if (
+														(prompt !== '' || hasImageInput) &&
+														e.key === 'Enter' &&
+														!e.shiftKey
+													) {
 														dispatch('submit', prompt);
 													}
 												}
@@ -936,13 +942,7 @@
 															const reader = new FileReader();
 
 															reader.onload = function (e) {
-																files = [
-																	...files,
-																	{
-																		type: 'image',
-																		url: `${e.target.result}`
-																	}
-																];
+																addUserImage(`${e.target.result}`);
 															};
 
 															reader.readAsDataURL(blob);
@@ -1070,31 +1070,31 @@
 													</Tooltip>
 												</div>
 											{:else} -->
-                      <div class=" flex items-center">
-                        <Tooltip content={$i18n.t('Send message')}>
-                          <button
-                            id="send-message-button"
-                            class="{prompt !== ''
-                              ? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
-                              : 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-1.5 self-center"
-                            type="submit"
-                            disabled={prompt === ''}
-                          >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 16 16"
-                              fill="currentColor"
-                              class="size-6"
-                            >
-                              <path
-                                fill-rule="evenodd"
-                                d="M8 14a.75.75 0 0 1-.75-.75V4.56L4.03 7.78a.75.75 0 0 1-1.06-1.06l4.5-4.5a.75.75 0 0 1 1.06 0l4.5 4.5a.75.75 0 0 1-1.06 1.06L8.75 4.56v8.69A.75.75 0 0 1 8 14Z"
-                                clip-rule="evenodd"
-                              />
-                            </svg>
-                          </button>
-                        </Tooltip>
-                      </div>
+											<div class=" flex items-center">
+												<Tooltip content={$i18n.t('Send message')}>
+													<button
+														id="send-message-button"
+														class="{prompt !== '' || hasImageInput
+															? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
+															: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-1.5 self-center"
+														type="submit"
+														disabled={prompt === '' && !hasImageInput}
+													>
+														<svg
+															xmlns="http://www.w3.org/2000/svg"
+															viewBox="0 0 16 16"
+															fill="currentColor"
+															class="size-6"
+														>
+															<path
+																fill-rule="evenodd"
+																d="M8 14a.75.75 0 0 1-.75-.75V4.56L4.03 7.78a.75.75 0 0 1-1.06-1.06l4.5-4.5a.75.75 0 0 1 1.06 0l4.5 4.5a.75.75 0 0 1-1.06 1.06L8.75 4.56v8.69A.75.75 0 0 1 8 14Z"
+																clip-rule="evenodd"
+															/>
+														</svg>
+													</button>
+												</Tooltip>
+											</div>
 											<!-- {/if} -->
 										{:else}
 											<div class=" flex items-center">
