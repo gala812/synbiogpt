@@ -31,18 +31,35 @@ def test_rag_prompt_has_one_consistent_evidence_and_citation_policy():
     assert "General-knowledge fallback is handled separately" in prompt
     assert "[1]" in prompt and "[1][2]" in prompt
     assert "whitepaper.pdf" not in prompt
-    assert "same language" in prompt
+    assert "Always respond in Chinese" in prompt
     assert "{{CONTEXT}}" in prompt and "{{QUERY}}" in prompt
 
 
 def test_multimodal_prompt_only_adds_visual_evidence_rules():
     prompt = PROMPTS.MULTIMODAL_EVIDENCE_SYSTEM_PROMPT
+    normalized = " ".join(prompt.split())
 
     assert "images are evidence" in prompt
     assert "unreadable" in prompt
-    assert "place the asset" in prompt
-    assert "below it" in prompt
+    assert "user-provided images" in prompt
+    assert "retrieved paper figures and tables" in prompt
+    assert "never claim that retrieved literature content is visible" in normalized
+    assert "`ND`, blank cells" in prompt
+    assert "describe each observation separately" in prompt
+    assert "place the asset" in normalized
+    assert "below it" in normalized
     assert "main retrieval prompt" in prompt
+    assert "Always write the final answer in Chinese" in normalized
+
+
+def test_user_image_prompt_always_requires_a_chinese_answer():
+    prompt = PROMPTS.USER_IMAGE_SYSTEM_PROMPT
+    normalized = " ".join(prompt.split())
+
+    assert "Always write the final answer in Chinese" in prompt
+    assert "not literature sources" in normalized
+    assert "`ND`, blank cells" in prompt
+    assert "If the two conflict" in prompt
 
 
 def test_dialogue_prompts_are_centralized_and_nonempty():

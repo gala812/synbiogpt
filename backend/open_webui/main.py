@@ -1045,6 +1045,8 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
 
             context_string = context_string.strip()
             prompt = get_last_user_message(body["messages"])
+            if prompt is None and file_flags.get("user_image_count"):
+                prompt = IMAGE_ONLY_QUERY_TEXT
 
             if prompt is None:
                 raise Exception("No user message found")
