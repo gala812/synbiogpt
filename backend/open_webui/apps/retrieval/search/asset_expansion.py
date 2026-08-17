@@ -64,6 +64,29 @@ def _logical_ids(metadata: dict[str, Any]) -> list[str]:
     )
 
 
+def filter_direct_anchor_image_urls(context_documents: list[Any]) -> tuple[int, int]:
+    """Keep URLs only when a retrieved anchor directly identifies a figure/table."""
+
+    kept = removed = 0
+    for document in context_documents:
+        metadata = document.metadata or {}
+        directly_bound = (
+            metadata.get("context_role") == "anchor"
+            and bool(_values(metadata, "asset_keys"))
+            and bool(
+                _logical_ids(metadata)
+                or str(metadata.get("chunk_type") or "") in CAPTION_TYPES
+            )
+        )
+        image_urls = _values(metadata, "image_urls")
+        if directly_bound and image_urls:
+            kept += len(image_urls)
+        elif image_urls:
+            removed += len(image_urls)
+            metadata.pop("image_urls", None)
+    return kept, removed
+
+
 def _source_priority(document: Any) -> tuple[int, int, int, str]:
     metadata = document.metadata or {}
     try:

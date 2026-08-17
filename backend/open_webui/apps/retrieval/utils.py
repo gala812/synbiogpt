@@ -19,6 +19,9 @@ from open_webui.apps.retrieval.synbio.evidence_gate import (
 from open_webui.apps.retrieval.synbio.pipeline import (
     add_asset_urls,
 )
+from open_webui.apps.retrieval.search.asset_expansion import (
+    filter_direct_anchor_image_urls,
+)
 from open_webui.utils.misc import get_last_user_message
 
 from open_webui.env import SRC_LOG_LEVELS
@@ -482,6 +485,16 @@ def _recover_fulltext_context(
             assets.duplicate_key_count,
             assets.image_limit_skipped_count,
             assets.unresolved_url_count,
+        )
+    else:
+        kept_images, removed_images = filter_direct_anchor_image_urls(
+            recovered.documents
+        )
+        log.info(
+            "[ASSET] direct_anchor_images kept=%d removed=%d include_assets=%s",
+            kept_images,
+            removed_images,
+            include_assets,
         )
 
     log.info(
