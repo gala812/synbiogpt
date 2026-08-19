@@ -2,11 +2,52 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
 
 
 MAX_USER_IMAGES = 4
 IMAGE_ONLY_QUERY_TEXT = "Analyze the current user image."
+
+_EXPLICIT_LITERATURE_RE = re.compile(
+    r"(?:结合|参考|依据|根据).{0,8}(?:文献|论文|全文|知识库|研究证据)"
+    r"|(?:检索|搜索|查询|查找|查阅).{0,8}(?:文献|论文|全文|知识库)"
+    r"|(?:search|retrieve|consult|look\s+up).{0,20}"
+    r"(?:literature|papers?|full[\s-]?text|knowledge\s+base)"
+    r"|(?:using|with|based\s+on).{0,8}"
+    r"(?:literature|papers?|full[\s-]?text|knowledge\s+base|research\s+evidence)"
+)
+_EXPLICIT_NO_LITERATURE_RE = re.compile(
+    r"(?:不需要|无需|不要|不必).{0,4}"
+    r"(?:检索|搜索|查询|查阅|参考|结合).{0,8}"
+    r"(?:文献|论文|全文|知识库)"
+    r"|(?:without|do\s+not|don't|no\s+need\s+to).{0,8}"
+    r"(?:search|retrieve|consult).{0,20}"
+    r"(?:literature|papers?|full[\s-]?text|knowledge\s+base)"
+)
+_EXPLICIT_IMAGE_ONLY_RE = re.compile(
+    r"(?:请|请帮我|帮我)?\s*(?:只|仅|直接)?\s*"
+    r"(?:分析|解读|解释|读取|查看|描述|识别).{0,8}"
+    r"(?:图片|图像|图|表格|表)"
+    r"|(?:analy[sz]e|interpret|read|describe|inspect).{0,8}"
+    r"(?:this|the|attached|current)?\s*(?:image|figure|table|chart)"
+)
+
+
+def explicit_image_retrieval_preference(message: object) -> bool | None:
+    """Return an explicit literature preference, leaving ambiguous turns unset."""
+
+    if not isinstance(message, str) or not message.strip():
+        return None
+    normalized = unicodedata.normalize("NFKC", message).casefold()
+    if _EXPLICIT_NO_LITERATURE_RE.search(normalized):
+        return False
+    if _EXPLICIT_LITERATURE_RE.search(normalized):
+        return True
+    if _EXPLICIT_IMAGE_ONLY_RE.search(normalized):
+        return False
+    return None
 
 
 def current_user_image_items(

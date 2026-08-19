@@ -171,6 +171,45 @@ def test_pure_text_query_generation_shape_is_unchanged():
     )
 
 
+def test_explicit_image_only_requests_disable_retrieval():
+    messages = (
+        "请直接分析这张图，不需要检索文献。",
+        "只读取这张表中明确可见的数据，并说明 ND 不能怎样解释。",
+        "Analyze this image without searching the literature.",
+    )
+
+    assert all(
+        MODULE.explicit_image_retrieval_preference(message) is False
+        for message in messages
+    )
+
+
+def test_explicit_literature_requests_enable_retrieval():
+    messages = (
+        "结合全文文献解释图中的细菌纤维素策略。",
+        "请查询知识库并分析这张表。",
+        "Analyze this figure using the literature.",
+    )
+
+    assert all(
+        MODULE.explicit_image_retrieval_preference(message) is True
+        for message in messages
+    )
+
+
+def test_literature_request_wins_when_both_intents_are_present():
+    message = "不要只分析这张图，请结合文献解释其机制。"
+
+    assert MODULE.explicit_image_retrieval_preference(message) is True
+
+
+def test_ambiguous_or_invalid_image_requests_keep_model_routing():
+    assert MODULE.explicit_image_retrieval_preference("这可能是什么机制？") is None
+    assert MODULE.explicit_image_retrieval_preference("") is None
+    assert MODULE.explicit_image_retrieval_preference(None) is None
+    assert MODULE.explicit_image_retrieval_preference([]) is None
+
+
 def test_does_not_change_messages_without_retrieved_images():
     messages = [{"role": "user", "content": "没有图片的查询"}]
 

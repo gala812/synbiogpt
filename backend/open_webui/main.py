@@ -54,6 +54,7 @@ from open_webui.apps.retrieval.multimodal_answer import (
     MAX_USER_IMAGES,
     build_query_generation_content,
     build_retrieval_image_files,
+    explicit_image_retrieval_preference,
     retain_current_user_images,
 )
 from open_webui.apps.retrieval.prompts import USER_IMAGE_SYSTEM_PROMPT
@@ -575,6 +576,20 @@ async def chat_completion_files_handler(
     )
     original_query = get_last_user_message(body["messages"]) or ""
     query_input = original_query or IMAGE_ONLY_QUERY_TEXT
+    image_retrieval_preference = explicit_image_retrieval_preference(
+        original_query
+    )
+    if user_image_count and image_retrieval_preference is False:
+        log.info(
+            "[PERF] rag.route route=multimodal_direct sources=0 images=%d "
+            "reason=explicit_user_intent",
+            user_image_count,
+        )
+        return body, {
+            "sources": sources,
+            "direct_multimodal": True,
+            "user_image_count": user_image_count,
+        }
     if (
         not user_image_count
         and original_query
@@ -635,7 +650,10 @@ async def chat_completion_files_handler(
                 query_input,
                 generated,
                 inherited_exact_terms=inherited_terms,
-                allow_no_retrieval=bool(user_image_count),
+                allow_no_retrieval=(
+                    bool(user_image_count)
+                    and image_retrieval_preference is not True
+                ),
             )
             if user_image_count and not processed_query.needs_retrieval:
                 log.info(
