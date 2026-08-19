@@ -27,6 +27,11 @@ from open_webui.apps.retrieval.models.medcpt import (
     MedCPTCrossEncoder,
     MedCPTQueryEncoder,
 )
+from open_webui.apps.retrieval.models.specter2 import Specter2PaperEncoder
+from open_webui.apps.retrieval.search.specter2_papers import (
+    PmidPmcidMapper,
+    Specter2PaperRetriever,
+)
 
 # Document loaders
 from open_webui.apps.retrieval.loaders.main import Loader
@@ -341,6 +346,39 @@ def _load_medcpt_cross_encoder():
     return encoder
 
 
+def _load_specter2_paper_retriever():
+    model_name = os.getenv("SPECTER2_MODEL_PATH", "").strip()
+    if not model_name and (model_dir := os.getenv("SPECTER2_MODEL_DIR", "").strip()):
+        model_name = str(Path(model_dir) / "base")
+    if not model_name:
+        return None
+    qdrant_url = os.getenv("QDRANT_URI", "").strip()
+    if not qdrant_url:
+        raise RuntimeError("QDRANT_URI is required for SPECTER2 paper search")
+
+    encoder = Specter2PaperEncoder(
+        model_name,
+        device=os.getenv("SPECTER2_DEVICE", DEVICE_TYPE),
+        dtype=os.getenv("SPECTER2_DTYPE", "auto"),
+    )
+    mapping_path = os.getenv("SPECTER2_PMID_MAPPING_DB", "").strip()
+    retriever = Specter2PaperRetriever(
+        url=qdrant_url,
+        api_key=os.getenv("QDRANT_API_KEY", "").strip() or None,
+        encoder=encoder,
+        mapper=PmidPmcidMapper(mapping_path) if mapping_path else None,
+    )
+    collection = retriever.validate_collection()
+    log.info(
+        "Loaded SPECTER2 paper search model=%s device=%s collection=%s points=%d",
+        model_name,
+        os.getenv("SPECTER2_DEVICE", DEVICE_TYPE),
+        collection["collection_name"],
+        collection["points_count"],
+    )
+    return retriever
+
+
 def _build_embedding_function():
     default = get_embedding_function(
         app.state.config.RAG_EMBEDDING_ENGINE,
@@ -389,6 +427,7 @@ app.state.medcpt_cross_encoder = _load_medcpt_cross_encoder()
 app.state.sentence_transformer_rf = _build_reranking_function(
     app.state.sentence_transformer_rf
 )
+app.state.specter2_paper_retriever = _load_specter2_paper_retriever()
 
 app.add_middleware(
     CORSMiddleware,
@@ -952,6 +991,64 @@ async def update_query_settings(
         "r": app.state.config.RELEVANCE_THRESHOLD,
         "hybrid": app.state.config.ENABLE_RAG_HYBRID_SEARCH,
     }
+
+
+class PaperSearchForm(BaseModel):
+    semantic_query: str
+    limit: int = 10
+
+
+class RelatedPapersForm(BaseModel):
+    pmid: str
+    limit: int = 10
+
+
+def _specter2_paper_retriever() -> Specter2PaperRetriever:
+    retriever = app.state.specter2_paper_retriever
+    if retriever is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SPECTER2 paper search is not configured",
+        )
+    return retriever
+
+
+@app.post("/papers/search")
+def search_papers(form_data: PaperSearchForm, user=Depends(get_verified_user)):
+    """Search papers with Query Processor's English semantic query."""
+    try:
+        hits = _specter2_paper_retriever().search(
+            form_data.semantic_query, limit=form_data.limit
+        )
+        return {
+            "semantic_query": form_data.semantic_query,
+            "results": [hit.to_dict() for hit in hits],
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("SPECTER2 paper search failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/papers/related")
+def related_papers(form_data: RelatedPapersForm, user=Depends(get_verified_user)):
+    """Recommend papers nearest to an indexed PMID."""
+    try:
+        hits = _specter2_paper_retriever().related(
+            form_data.pmid, limit=form_data.limit
+        )
+        return {
+            "pmid": form_data.pmid,
+            "results": [hit.to_dict() for hit in hits],
+        }
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("SPECTER2 related-paper search failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 ####################################

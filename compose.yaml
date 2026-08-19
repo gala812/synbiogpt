@@ -16,6 +16,8 @@ services:
       FRONTEND_BUILD_DIR: /app/frontend
       MEDCPT_QUERY_ENCODER_MODEL: /models/MedCPT/Query-Encoder
       MEDCPT_CROSS_ENCODER_MODEL: /models/MedCPT/Cross-Encoder
+      SPECTER2_MODEL_PATH: /models/SPECTER2/base
+      SPECTER2_PMID_MAPPING_DB: /data/id_mapping/pmid_pmcid_full.sqlite3
     volumes:
       - type: bind
         source: ${SYNBIO_DATA_DIR:-./backend/data}
@@ -23,6 +25,14 @@ services:
       - type: bind
         source: ${MEDCPT_MODEL_DIR:-/qiannanhu01/models/MedCPT}
         target: /models/MedCPT
+        read_only: true
+      - type: bind
+        source: ${SPECTER2_MODEL_DIR:-/qiannanhu01_nfs/models/SPECTER2}
+        target: /models/SPECTER2
+        read_only: true
+      - type: bind
+        source: ${SPECTER2_PMID_MAPPING_DB:-./data/id_mapping/pmid_pmcid_full.sqlite3}
+        target: /data/id_mapping/pmid_pmcid_full.sqlite3
         read_only: true
     extra_hosts:
       - host.docker.internal:host-gateway

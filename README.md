@@ -43,6 +43,8 @@ OPENAI_MODEL=Qwen3.5-4B
 QDRANT_URI=http://host.docker.internal:6333
 OPENSEARCH_URI=http://host.docker.internal:9200
 MEDCPT_MODEL_DIR=/qiannanhu01/models/MedCPT
+SPECTER2_MODEL_DIR=/qiannanhu01_nfs/models/SPECTER2
+SPECTER2_PMID_MAPPING_DB=/path/to/pmid_pmcid_full.sqlite3
 SYNBIO_DATA_DIR=./backend/data
 ```
 
@@ -121,6 +123,11 @@ bash dev.sh
 - `Query Processor → MedCPT Dense + BM25 → RRF → Cross Encoder`
 - 命中后恢复 Parent/Previous/Next，并扩展 Figure/Table 证据
 - WebUI 与离线验证 CLI 共用同一 `RetrievalPipeline`
+
+SPECTER2 是独立的论文级通道，不参与全文 chunk 融合。Query Processor 生成
+英文 `semantic_query` 后，可调用 `/retrieval/api/v1/papers/search` 搜索论文；
+`/retrieval/api/v1/papers/related` 根据 PMID 推荐相关论文。两者固定读取 Qdrant
+别名 `synbiogpt_papers_specter2`，不会重建论文向量。
 
 后台可通过 `/retrieval/api/v1/query/settings` 与 `/retrieval/api/v1/query/settings/update` 查看和更新 `hybrid` 开关。
 
