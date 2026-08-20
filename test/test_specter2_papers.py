@@ -161,6 +161,17 @@ def test_search_uses_alias_and_deduplicates_pmids(tmp_path):
     assert client.query["query"] == [1.0, 0.0, 0.0]
 
 
+def test_search_defaults_to_five_papers():
+    client = FakeClient()
+    retriever = Specter2PaperRetriever(
+        url="http://qdrant", encoder=FakeEncoder(), client=client
+    )
+
+    retriever.search("CRISPR interference")
+
+    assert client.query["limit"] == 15
+
+
 def test_search_rejects_invalid_input():
     retriever = Specter2PaperRetriever(
         url="http://qdrant", encoder=FakeEncoder(), client=FakeClient()

@@ -168,7 +168,7 @@ class Specter2PaperRetriever:
         self,
         vector: list[float],
         *,
-        limit: int = 10,
+        limit: int = 5,
         excluded_pmid: str = "",
     ) -> list[PaperSearchHit]:
         if not 1 <= limit <= 50:
@@ -189,7 +189,7 @@ class Specter2PaperRetriever:
             response.points, limit=limit, excluded_pmid=excluded_pmid
         )
 
-    def search(self, semantic_query: str, *, limit: int = 10):
+    def search(self, semantic_query: str, *, limit: int = 5):
         semantic_query = semantic_query.strip()
         if not semantic_query:
             raise ValueError("semantic_query cannot be empty")
@@ -242,7 +242,7 @@ class Specter2PaperRetriever:
         status = "exact" if exact else "high_confidence" if matched else "ambiguous"
         return TitleResolution(status, best_score, matched, tuple(ranked[:3]))
 
-    def related(self, pmid: str, *, limit: int = 10):
+    def related(self, pmid: str, *, limit: int = 5):
         pmid = pmid.strip()
         if not pmid.isdigit():
             raise ValueError("pmid must contain digits only")

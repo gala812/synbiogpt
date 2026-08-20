@@ -569,15 +569,16 @@ async def chat_completion_tools_handler(
     return body, {"sources": sources}
 
 
-def _paper_search_sources(hits) -> list[dict]:
+def _paper_search_sources(hits, *, context_note: str = "") -> list[dict]:
     if not hits:
         return []
+    documents = [f"Title: {hit.title}\nAbstract: {hit.abstract}" for hit in hits]
+    if context_note:
+        documents[0] = f"{context_note}\n\n{documents[0]}"
     return [
         {
             "source": {"name": "Paper search", "type": "paper_search"},
-            "document": [
-                f"Title: {hit.title}\nAbstract: {hit.abstract}" for hit in hits
-            ],
+            "document": documents,
             "metadata": [
                 {
                     "pmid": hit.pmid,
@@ -658,11 +659,13 @@ async def chat_completion_files_handler(
     if paper_request:
         started = time.perf_counter()
         try:
+            seed_paper = None
             if paper_request.identifier_type == "pmid":
+                seed_paper = paper_retriever.paper(paper_request.identifier_value)
                 hits = (
-                    paper_retriever.related(paper_request.identifier_value, limit=10)
+                    paper_retriever.related(seed_paper.pmid, limit=5)
                     if paper_request.intent == "related_papers"
-                    else [paper_retriever.paper(paper_request.identifier_value)]
+                    else [seed_paper]
                 )
             elif paper_request.identifier_type == "title":
                 resolution = paper_retriever.resolve_title(
@@ -697,10 +700,11 @@ async def chat_completion_files_handler(
                         "paper_title_candidates": candidates,
                         "user_image_count": 0,
                     }
+                seed_paper = resolution.matched
                 hits = (
-                    paper_retriever.related(resolution.matched.pmid, limit=10)
+                    paper_retriever.related(seed_paper.pmid, limit=5)
                     if paper_request.intent == "related_papers"
-                    else [resolution.matched]
+                    else [seed_paper]
                 )
             else:
                 history_window = query_message_window(body["messages"])
@@ -716,9 +720,17 @@ async def chat_completion_files_handler(
                 processed = SYNBIO_RETRIEVAL.process_generated_query(
                     original_query, generated
                 )
-                hits = paper_retriever.search(processed.semantic_query, limit=10)
+                hits = paper_retriever.search(processed.semantic_query, limit=5)
 
-            sources = _paper_search_sources(hits)
+            context_note = ""
+            if paper_request.intent == "related_papers" and seed_paper:
+                context_note = (
+                    "Seed paper for this related-paper recommendation: "
+                    f"PMID {seed_paper.pmid}; title: {seed_paper.title}. "
+                    "The seed paper is intentionally excluded from the recommended "
+                    "candidates; do not claim that the PMID or title was not found."
+                )
+            sources = _paper_search_sources(hits, context_note=context_note)
             log.info(
                 "[PERF] paper.route route=%s identifier=%s papers=%d "
                 "duration=%.3fs",

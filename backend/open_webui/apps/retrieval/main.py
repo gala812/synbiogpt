@@ -995,13 +995,13 @@ async def update_query_settings(
 
 class PaperSearchForm(BaseModel):
     semantic_query: str
-    limit: int = 10
+    limit: int = 5
 
 
 class RelatedPapersForm(BaseModel):
     pmid: Optional[str] = None
     title: Optional[str] = None
-    limit: int = 10
+    limit: int = 5
 
 
 class ResolvePaperTitleForm(BaseModel):
