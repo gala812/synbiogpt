@@ -59,6 +59,7 @@ from open_webui.apps.retrieval.multimodal_answer import (
 )
 from open_webui.apps.retrieval.paper_routing import parse_paper_request
 from open_webui.apps.retrieval.prompts import (
+    PAPER_FOLLOW_UP_CONFIRMATION_PROMPT,
     PAPER_TITLE_CONFIRMATION_PROMPT,
     USER_IMAGE_SYSTEM_PROMPT,
 )
@@ -75,7 +76,10 @@ from open_webui.apps.retrieval.synbio.conversation import (
     fallback_semantic_query,
     inherited_exact_terms,
     is_contextual_follow_up,
+    is_paper_contextual_follow_up,
     query_message_window,
+    recent_specter2_papers,
+    resolve_paper_follow_up,
 )
 from open_webui.apps.retrieval.synbio.dialogue import (
     get_no_evidence_mode,
@@ -119,6 +123,7 @@ from open_webui.apps.webui.main import (
     generate_function_chat_completion,
     get_all_models as get_open_webui_models,
 )
+from open_webui.apps.webui.models.chats import Chats
 from open_webui.apps.webui.models.functions import Functions
 from open_webui.apps.webui.models.models import Models
 from open_webui.apps.webui.models.users import UserModel, Users
@@ -767,6 +772,40 @@ async def chat_completion_files_handler(
                 "user_image_count": 0,
             }
 
+    candidate_pmids = None
+    if not user_image_count and is_paper_contextual_follow_up(original_query):
+        chat_id = metadata.get("chat_id")
+        chat = Chats.get_chat_by_id_and_user_id(chat_id, user.id) if chat_id else None
+        paper_follow_up = resolve_paper_follow_up(
+            original_query,
+            recent_specter2_papers(chat.chat if chat else None),
+        )
+        if paper_follow_up.status == "ambiguous":
+            candidates = [
+                {
+                    "citation_index": paper.citation_index,
+                    "pmid": paper.pmid,
+                    "title": paper.title,
+                }
+                for paper in paper_follow_up.papers
+            ]
+            log.info(
+                "[PERF] paper.route route=follow_up_confirmation candidates=%d",
+                len(candidates),
+            )
+            return body, {
+                "sources": [],
+                "paper_context_ambiguous": True,
+                "paper_context_candidates": candidates,
+                "user_image_count": 0,
+            }
+        if paper_follow_up.status == "resolved":
+            candidate_pmids = [paper.pmid for paper in paper_follow_up.papers]
+            log.info(
+                "[PERF] paper.route route=fulltext_follow_up pmids=%s",
+                candidate_pmids,
+            )
+
     files = add_default_knowledge(
         metadata.get("files"),
         metadata,
@@ -900,6 +939,7 @@ async def chat_completion_files_handler(
                 hybrid_search=retrieval_app.state.config.ENABLE_RAG_HYBRID_SEARCH,
                 include_assets=visual_evidence_requested,
                 retrieval_diagnostics=retrieval_diagnostics,
+                candidate_pmids=candidate_pmids,
             )
             if not sources:
                 no_evidence_reason = (
@@ -1165,6 +1205,37 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
                 )
             log.info(
                 "[PERF] paper.route route=title_confirmation candidates=%d",
+                len(candidates),
+            )
+        elif file_flags.get("paper_context_ambiguous"):
+            if sources:
+                log.warning(
+                    "Paper follow-up confirmation ignored %d source groups produced "
+                    "by tools",
+                    len(sources),
+                )
+                sources = []
+            candidates = file_flags.get("paper_context_candidates") or []
+            candidate_lines = "\n".join(
+                f"[{item.get('citation_index', '')}] {item.get('title', '')} "
+                f"(PMID: {item.get('pmid', '')})"
+                for item in candidates
+            )
+            confirmation_prompt = PAPER_FOLLOW_UP_CONFIRMATION_PROMPT.format(
+                candidates=candidate_lines
+            )
+            if model["owned_by"] == "ollama":
+                body["messages"] = prepend_to_first_user_message_content(
+                    confirmation_prompt,
+                    body["messages"],
+                )
+            else:
+                body["messages"] = add_or_update_system_message(
+                    confirmation_prompt,
+                    body["messages"],
+                )
+            log.info(
+                "[PERF] paper.route route=follow_up_confirmation candidates=%d",
                 len(candidates),
             )
         elif len(sources) > 0:

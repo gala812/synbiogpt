@@ -125,12 +125,14 @@ def query_doc(
     collection_name: str,
     query_embedding: list[float],
     k: int,
+    candidate_pmids: list[str] | None = None,
 ):
     try:
         result = VECTOR_DB_CLIENT.search(
             collection_name=collection_name,
             vectors=[query_embedding],
             limit=k,
+            where={"pmid": candidate_pmids} if candidate_pmids else None,
         )
 
         log.info(f"query_doc:result {result.ids} {result.metadatas}")
@@ -216,6 +218,7 @@ def _query_doc_with_opensearch_hybrid(
     r: float,
     vector_call_index: int = 1,
     vector_call_total: int = 1,
+    candidate_pmids: list[str] | None = None,
 ) -> dict:
     def bm25_search(processed_query):
         from open_webui.apps.retrieval.search.opensearch_bm25 import search_bm25
@@ -224,6 +227,7 @@ def _query_doc_with_opensearch_hybrid(
             [collection_name],
             processed_query.bm25_query,
             top_k=_RETRIEVAL_PIPELINE.config.bm25_top_k,
+            candidate_pmids=candidate_pmids,
             exact_terms=list(processed_query.exact_terms),
         )
         bm25_docs = _bm25_results_to_documents(bm25_results)
@@ -249,6 +253,7 @@ def _query_doc_with_opensearch_hybrid(
             collection_name=collection_name,
             query_embedding=query_embedding,
             k=_RETRIEVAL_PIPELINE.config.vector_top_k,
+            candidate_pmids=candidate_pmids,
         )
         vector_docs = _vector_result_to_documents(vector_result)
         for document in vector_docs:
@@ -325,6 +330,7 @@ def query_doc_with_hybrid_search(
     r: float,
     vector_call_index: int = 1,
     vector_call_total: int = 1,
+    candidate_pmids: list[str] | None = None,
 ) -> dict:
     t0 = time.perf_counter()
     try:
@@ -338,6 +344,7 @@ def query_doc_with_hybrid_search(
             r=r,
             vector_call_index=vector_call_index,
             vector_call_total=vector_call_total,
+            candidate_pmids=candidate_pmids,
         )
         log.info(
             "[PERF] rag.total_hybrid duration=%.3fs collection=%s vector_call=%d/%d",
@@ -522,6 +529,7 @@ def query_collection(
     queries: list[str | ProcessedQuery],
     embedding_function,
     k: int,
+    candidate_pmids: list[str] | None = None,
 ) -> dict:
     results = []
     for query in queries:
@@ -540,6 +548,7 @@ def query_collection(
                         collection_name=collection_name,
                         k=k,
                         query_embedding=embeddings_by_encoder[encoder_key],
+                        candidate_pmids=candidate_pmids,
                     )
                     if result is not None:
                         results.append(result.model_dump())
@@ -560,6 +569,7 @@ def query_collection_with_hybrid_search(
     reranking_function,
     r: float,
     include_assets: bool = True,
+    candidate_pmids: list[str] | None = None,
 ) -> dict:
     results = []
     error = False
@@ -589,6 +599,7 @@ def query_collection_with_hybrid_search(
                     r=r,
                     vector_call_index=collection_vector_counts[collection_name],
                     vector_call_total=query_count,
+                    candidate_pmids=candidate_pmids,
                 )
                 results.append(result)
         except Exception as e:
@@ -656,6 +667,7 @@ def get_sources_from_files(
     hybrid_search,
     include_assets: bool = True,
     retrieval_diagnostics: dict | None = None,
+    candidate_pmids: list[str] | None = None,
 ):
     # ---------------- logs ----------------
     log.debug("======================= retrieval start =======================")
@@ -772,6 +784,7 @@ def get_sources_from_files(
                     reranking_function=reranking_function,
                     r=r,
                     include_assets=include_assets,
+                    candidate_pmids=candidate_pmids,
                 )
                 log.info(
                     "[TIMING] file[%d/%d] hybrid_search %.3fs collections=%d",
@@ -792,6 +805,7 @@ def get_sources_from_files(
                     queries=queries,
                     embedding_function=embedding_function,
                     k=k,
+                    candidate_pmids=candidate_pmids,
                 )
                 log.info(
                     "[TIMING] file[%d/%d] non_hybrid_search %.3fs collections=%d",

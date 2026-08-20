@@ -120,3 +120,116 @@ def test_recent_query_cache_is_bounded_and_conversation_scoped():
         "user", {"chat_id": "chat-2"}
     ) == "user:chat-2"
     assert CONVERSATION.conversation_key("user", {}) == ""
+
+
+def paper_source(index, pmid, title):
+    return {
+        "citation_index": index,
+        "title": title,
+        "metadata": {
+            "pmid": pmid,
+            "pmcid": f"PMC{pmid}",
+            "retrieval_source": "specter2_paper",
+        },
+    }
+
+
+def persisted_chat(sources):
+    return {
+        "history": {
+            "currentId": "assistant-1",
+            "messages": {
+                "user-1": {
+                    "id": "user-1",
+                    "parentId": None,
+                    "role": "user",
+                    "content": "查找相关论文",
+                },
+                "assistant-1": {
+                    "id": "assistant-1",
+                    "parentId": "user-1",
+                    "role": "assistant",
+                    "content": "找到以下论文",
+                    "sources": sources,
+                },
+            },
+        }
+    }
+
+
+def test_single_specter2_result_anchors_singular_fulltext_follow_up():
+    papers = CONVERSATION.recent_specter2_papers(
+        persisted_chat([paper_source(1, "32064678", "CRISPRi strain engineering")])
+    )
+    resolution = CONVERSATION.resolve_paper_follow_up(
+        "这篇论文中ldhA的实验条件是什么？", papers
+    )
+
+    assert resolution.status == "resolved"
+    assert [paper.pmid for paper in resolution.papers] == ["32064678"]
+
+
+def test_numbered_follow_up_selects_one_paper_from_previous_results():
+    papers = CONVERSATION.recent_specter2_papers(
+        persisted_chat(
+            [
+                paper_source(1, "111", "First paper"),
+                paper_source(2, "222", "Second paper"),
+            ]
+        )
+    )
+
+    resolution = CONVERSATION.resolve_paper_follow_up(
+        "请说明第2篇论文中的培养条件", papers
+    )
+
+    assert resolution.status == "resolved"
+    assert [paper.pmid for paper in resolution.papers] == ["222"]
+
+
+def test_plural_follow_up_keeps_previous_paper_set():
+    papers = CONVERSATION.recent_specter2_papers(
+        persisted_chat(
+            [
+                paper_source(1, "111", "First paper"),
+                paper_source(2, "222", "Second paper"),
+            ]
+        )
+    )
+
+    resolution = CONVERSATION.resolve_paper_follow_up(
+        "这些论文使用了哪些菌株？", papers
+    )
+
+    assert resolution.status == "resolved"
+    assert [paper.pmid for paper in resolution.papers] == ["111", "222"]
+
+
+def test_ambiguous_singular_follow_up_requires_confirmation():
+    papers = CONVERSATION.recent_specter2_papers(
+        persisted_chat(
+            [
+                paper_source(1, "111", "First paper"),
+                paper_source(2, "222", "Second paper"),
+            ]
+        )
+    )
+
+    resolution = CONVERSATION.resolve_paper_follow_up(
+        "这篇论文的实验条件是什么？", papers
+    )
+
+    assert resolution.status == "ambiguous"
+    assert len(resolution.papers) == 2
+
+
+def test_non_paper_question_does_not_reuse_specter2_context():
+    papers = CONVERSATION.recent_specter2_papers(
+        persisted_chat([paper_source(1, "111", "First paper")])
+    )
+
+    resolution = CONVERSATION.resolve_paper_follow_up(
+        "CRISPRi为什么能够抑制转录？", papers
+    )
+
+    assert resolution.status == "none"

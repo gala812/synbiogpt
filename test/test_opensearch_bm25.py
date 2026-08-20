@@ -96,6 +96,21 @@ def test_generic_collection_keeps_generic_bm25_index(monkeypatch):
     assert client.index == "open_webui_bm25"
 
 
+def test_candidate_pmids_limit_fulltext_search(monkeypatch):
+    client = FakeClient()
+    monkeypatch.setattr(MODULE, "_get_client", lambda: client)
+
+    MODULE.search_bm25(
+        ["fulltext_medcpt_ip_v1"],
+        "ldhA experimental conditions",
+        candidate_pmids=["32064678"],
+    )
+
+    assert {"terms": {"pmid": ["32064678"]}} in client.body["query"]["bool"][
+        "filter"
+    ]
+
+
 def test_fetch_chunks_by_ids_uses_deterministic_storage_ids(monkeypatch):
     client = FakeClient()
     monkeypatch.setattr(MODULE, "_get_client", lambda: client)
