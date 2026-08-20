@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import unicodedata
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,21 @@ class PaperSearchHit:
         result = asdict(self)
         result["pubmed_url"] = f"https://pubmed.ncbi.nlm.nih.gov/{self.pmid}/"
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class TitleResolution:
+    status: str
+    similarity: float
+    matched: PaperSearchHit | None
+    candidates: tuple[tuple[float, PaperSearchHit], ...]
+
+
+def normalize_paper_title(title: str) -> str:
+    """Normalize presentation differences without changing title words."""
+
+    value = unicodedata.normalize("NFKC", str(title or "")).casefold()
+    return " ".join("".join(char if char.isalnum() else " " for char in value).split())
 
 
 class PmidPmcidMapper:
@@ -178,10 +195,84 @@ class Specter2PaperRetriever:
             raise ValueError("semantic_query cannot be empty")
         return self.search_vector(self.encoder.encode(semantic_query), limit=limit)
 
+    def resolve_title(
+        self,
+        title: str,
+        *,
+        candidate_limit: int = 50,
+        min_similarity: float = 0.90,
+        ambiguity_margin: float = 0.03,
+    ) -> TitleResolution:
+        """Resolve a title from semantic candidates, preferring exact text matches."""
+
+        normalized = normalize_paper_title(title)
+        if not normalized:
+            raise ValueError("title cannot be empty")
+        candidates = self.search(title, limit=candidate_limit)
+        ranked = sorted(
+            (
+                (
+                    SequenceMatcher(
+                        None, normalized, normalize_paper_title(hit.title)
+                    ).ratio(),
+                    hit,
+                )
+                for hit in candidates
+                if hit.title
+            ),
+            key=lambda item: (-item[0], item[1].rank),
+        )
+        if not ranked:
+            return TitleResolution("not_found", 0.0, None, ())
+
+        best_score, best = ranked[0]
+        exact_matches = [
+            item for item in ranked if normalize_paper_title(item[1].title) == normalized
+        ]
+        if len(exact_matches) > 1:
+            return TitleResolution(
+                "ambiguous", best_score, None, tuple(exact_matches[:3])
+            )
+
+        exact = bool(exact_matches)
+        margin = best_score - (ranked[1][0] if len(ranked) > 1 else 0.0)
+        matched = best if exact or (
+            best_score >= min_similarity and margin >= ambiguity_margin
+        ) else None
+        status = "exact" if exact else "high_confidence" if matched else "ambiguous"
+        return TitleResolution(status, best_score, matched, tuple(ranked[:3]))
+
     def related(self, pmid: str, *, limit: int = 10):
         pmid = pmid.strip()
         if not pmid.isdigit():
             raise ValueError("pmid must contain digits only")
+        point = self._point_by_pmid(pmid, with_payload=False, with_vectors=True)
+        vector = point.vector
+        if isinstance(vector, dict):
+            vector = next(iter(vector.values()))
+        return self.search_vector(vector, limit=limit, excluded_pmid=pmid)
+
+    def paper(self, pmid: str) -> PaperSearchHit:
+        """Return one indexed paper by PMID without semantic query rewriting."""
+
+        pmid = pmid.strip()
+        if not pmid.isdigit():
+            raise ValueError("pmid must contain digits only")
+        point = self._point_by_pmid(pmid, with_payload=True, with_vectors=False)
+        payload = dict(point.payload or {})
+        mapping = self.mapper.lookup_many([pmid]) if self.mapper else {}
+        return PaperSearchHit(
+            rank=1,
+            pmid=pmid,
+            pmcid=mapping.get(pmid),
+            title=str(payload.get("title") or "").strip(),
+            abstract=str(payload.get("document") or "").strip(),
+            journal=str(payload.get("journal") or "").strip(),
+            publication_date=str(payload.get("publication_date") or "").strip(),
+            score=1.0,
+        )
+
+    def _point_by_pmid(self, pmid: str, *, with_payload: bool, with_vectors: bool):
         from qdrant_client import models
 
         points, _ = self.client.scroll(
@@ -194,12 +285,9 @@ class Specter2PaperRetriever:
                 ]
             ),
             limit=1,
-            with_payload=False,
-            with_vectors=True,
+            with_payload=with_payload,
+            with_vectors=with_vectors,
         )
         if not points:
             raise LookupError(f"PMID {pmid} is not present in the paper index")
-        vector = points[0].vector
-        if isinstance(vector, dict):
-            vector = next(iter(vector.values()))
-        return self.search_vector(vector, limit=limit, excluded_pmid=pmid)
+        return points[0]

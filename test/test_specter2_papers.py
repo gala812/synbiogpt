@@ -17,6 +17,7 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 PmidPmcidMapper = MODULE.PmidPmcidMapper
 Specter2PaperRetriever = MODULE.Specter2PaperRetriever
+normalize_paper_title = MODULE.normalize_paper_title
 
 ENCODER_PATH = (
     Path(__file__).parents[1]
@@ -170,3 +171,127 @@ def test_search_rejects_invalid_input():
         retriever.search("CRISPR interference", limit=51)
     with pytest.raises(ValueError, match="expected 3"):
         retriever.search_vector([1.0, 0.0])
+
+
+def test_pmid_lookup_and_recommendation_do_not_encode_a_query(monkeypatch):
+    class QueryModel:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "qdrant_client",
+        SimpleNamespace(
+            models=SimpleNamespace(
+                Filter=QueryModel,
+                FieldCondition=QueryModel,
+                MatchValue=QueryModel,
+            )
+        ),
+    )
+
+    class NoQueryEncoder:
+        dimension = 3
+
+        def encode(self, _):
+            raise AssertionError("PMID routes must use the indexed paper directly")
+
+    class LookupClient(FakeClient):
+        def scroll(self, **kwargs):
+            point = SimpleNamespace(
+                id="p1",
+                payload={
+                    "doc_id": "123",
+                    "title": "Seed paper",
+                    "document": "Seed abstract",
+                },
+                vector=[1.0, 0.0, 0.0],
+            )
+            return [point], None
+
+    retriever = Specter2PaperRetriever(
+        url="http://qdrant", encoder=NoQueryEncoder(), client=LookupClient()
+    )
+
+    assert retriever.paper("123").title == "Seed paper"
+    assert [hit.pmid for hit in retriever.related("123", limit=2)] == ["456"]
+
+
+def test_title_resolution_prefers_normalized_exact_match():
+    class TitleEncoder:
+        dimension = 3
+
+        def __init__(self):
+            self.query = None
+
+        def encode(self, query):
+            self.query = query
+            return [1.0, 0.0, 0.0]
+
+    class TitleClient(FakeClient):
+        def query_points(self, **kwargs):
+            return SimpleNamespace(
+                points=[
+                    SimpleNamespace(
+                        id="p1",
+                        score=0.95,
+                        payload={"doc_id": "111", "title": "A Related Cellulose Paper"},
+                    ),
+                    SimpleNamespace(
+                        id="p2",
+                        score=0.93,
+                        payload={
+                            "doc_id": "222",
+                            "title": "Three-Dimensional Printed Cellulose: For Wound Dressing Applications.",
+                        },
+                    ),
+                ]
+            )
+
+    supplied_title = (
+        "three-dimensional printed cellulose for wound dressing applications"
+    )
+    encoder = TitleEncoder()
+    retriever = Specter2PaperRetriever(
+        url="http://qdrant", encoder=encoder, client=TitleClient()
+    )
+    resolution = retriever.resolve_title(supplied_title)
+
+    assert resolution.status == "exact"
+    assert resolution.matched.pmid == "222"
+    assert encoder.query == supplied_title
+    assert normalize_paper_title("A: Paper.") == "a paper"
+
+
+def test_title_resolution_requires_confirmation_for_duplicate_exact_titles():
+    class TitleEncoder:
+        dimension = 3
+
+        def encode(self, _):
+            return [1.0, 0.0, 0.0]
+
+    class DuplicateTitleClient(FakeClient):
+        def query_points(self, **kwargs):
+            return SimpleNamespace(
+                points=[
+                    SimpleNamespace(
+                        id="p1",
+                        score=0.96,
+                        payload={"doc_id": "111", "title": "An Exact Paper Title"},
+                    ),
+                    SimpleNamespace(
+                        id="p2",
+                        score=0.95,
+                        payload={"doc_id": "222", "title": "An exact paper title."},
+                    ),
+                ]
+            )
+
+    retriever = Specter2PaperRetriever(
+        url="http://qdrant", encoder=TitleEncoder(), client=DuplicateTitleClient()
+    )
+    resolution = retriever.resolve_title("An Exact Paper Title")
+
+    assert resolution.status == "ambiguous"
+    assert resolution.matched is None
+    assert [hit.pmid for _, hit in resolution.candidates] == ["111", "222"]

@@ -999,8 +999,13 @@ class PaperSearchForm(BaseModel):
 
 
 class RelatedPapersForm(BaseModel):
-    pmid: str
+    pmid: Optional[str] = None
+    title: Optional[str] = None
     limit: int = 10
+
+
+class ResolvePaperTitleForm(BaseModel):
+    title: str
 
 
 def _specter2_paper_retriever() -> Specter2PaperRetriever:
@@ -1031,15 +1036,59 @@ def search_papers(form_data: PaperSearchForm, user=Depends(get_verified_user)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _title_resolution_response(resolution) -> dict:
+    return {
+        "status": resolution.status,
+        "similarity": resolution.similarity,
+        "matched_paper": (
+            resolution.matched.to_dict() if resolution.matched else None
+        ),
+        "candidates": [
+            {"similarity": similarity, **hit.to_dict()}
+            for similarity, hit in resolution.candidates
+        ],
+    }
+
+
+@app.post("/papers/resolve")
+def resolve_paper_title(
+    form_data: ResolvePaperTitleForm, user=Depends(get_verified_user)
+):
+    """Resolve a supplied title without rewriting it as a research question."""
+    try:
+        resolution = _specter2_paper_retriever().resolve_title(form_data.title)
+        return _title_resolution_response(resolution)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("SPECTER2 title resolution failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/papers/related")
 def related_papers(form_data: RelatedPapersForm, user=Depends(get_verified_user)):
-    """Recommend papers nearest to an indexed PMID."""
+    """Recommend papers from a PMID or a confidently resolved title."""
     try:
-        hits = _specter2_paper_retriever().related(
-            form_data.pmid, limit=form_data.limit
-        )
+        retriever = _specter2_paper_retriever()
+        resolution = None
+        pmid = str(form_data.pmid or "").strip()
+        if not pmid and form_data.title:
+            resolution = retriever.resolve_title(form_data.title)
+            if resolution.matched is None:
+                return {
+                    "pmid": None,
+                    "title_resolution": _title_resolution_response(resolution),
+                    "results": [],
+                }
+            pmid = resolution.matched.pmid
+        if not pmid:
+            raise ValueError("Either pmid or title is required")
+        hits = retriever.related(pmid, limit=form_data.limit)
         return {
-            "pmid": form_data.pmid,
+            "pmid": pmid,
+            "title_resolution": (
+                _title_resolution_response(resolution) if resolution else None
+            ),
             "results": [hit.to_dict() for hit in hits],
         }
     except HTTPException:

@@ -57,7 +57,11 @@ from open_webui.apps.retrieval.multimodal_answer import (
     explicit_image_retrieval_preference,
     retain_current_user_images,
 )
-from open_webui.apps.retrieval.prompts import USER_IMAGE_SYSTEM_PROMPT
+from open_webui.apps.retrieval.paper_routing import parse_paper_request
+from open_webui.apps.retrieval.prompts import (
+    PAPER_TITLE_CONFIRMATION_PROMPT,
+    USER_IMAGE_SYSTEM_PROMPT,
+)
 from open_webui.apps.retrieval.synbio import RetrievalPipeline
 from open_webui.apps.retrieval.synbio.citations import (
     build_citation_sources,
@@ -565,6 +569,32 @@ async def chat_completion_tools_handler(
     return body, {"sources": sources}
 
 
+def _paper_search_sources(hits) -> list[dict]:
+    if not hits:
+        return []
+    return [
+        {
+            "source": {"name": "Paper search", "type": "paper_search"},
+            "document": [
+                f"Title: {hit.title}\nAbstract: {hit.abstract}" for hit in hits
+            ],
+            "metadata": [
+                {
+                    "pmid": hit.pmid,
+                    "pmcid": hit.pmcid,
+                    "title": hit.title,
+                    "paper_title": hit.title,
+                    "journal": hit.journal,
+                    "publication_date": hit.publication_date,
+                    "score": hit.score,
+                    "retrieval_source": "specter2_paper",
+                }
+                for hit in hits
+            ],
+        }
+    ]
+
+
 async def chat_completion_files_handler(
     body: dict, user: UserModel
 ) -> tuple[dict, dict[str, object]]:
@@ -612,6 +642,118 @@ async def chat_completion_files_handler(
             "plain_chat": True,
             "user_image_count": user_image_count,
         }
+
+    paper_request = (
+        parse_paper_request(original_query) if not user_image_count else None
+    )
+    paper_retriever = retrieval_app.state.specter2_paper_retriever
+    if paper_request and paper_retriever is None:
+        log.warning("SPECTER2 paper route requested but the retriever is unavailable")
+        return body, {
+            "sources": [],
+            "no_evidence": True,
+            "no_evidence_reason": "paper_search_unavailable",
+            "user_image_count": 0,
+        }
+    if paper_request:
+        started = time.perf_counter()
+        try:
+            if paper_request.identifier_type == "pmid":
+                hits = (
+                    paper_retriever.related(paper_request.identifier_value, limit=10)
+                    if paper_request.intent == "related_papers"
+                    else [paper_retriever.paper(paper_request.identifier_value)]
+                )
+            elif paper_request.identifier_type == "title":
+                resolution = paper_retriever.resolve_title(
+                    paper_request.identifier_value
+                )
+                if resolution.status == "not_found":
+                    return body, {
+                        "sources": [],
+                        "no_evidence": True,
+                        "no_evidence_reason": "paper_title_not_found",
+                        "user_image_count": 0,
+                    }
+                if resolution.matched is None:
+                    candidates = [
+                        {
+                            "pmid": hit.pmid,
+                            "title": hit.title,
+                            "similarity": similarity,
+                        }
+                        for similarity, hit in resolution.candidates
+                    ]
+                    log.info(
+                        "[PERF] paper.route route=title_confirmation "
+                        "status=%s candidates=%d duration=%.3fs",
+                        resolution.status,
+                        len(candidates),
+                        time.perf_counter() - started,
+                    )
+                    return body, {
+                        "sources": [],
+                        "paper_title_ambiguous": True,
+                        "paper_title_candidates": candidates,
+                        "user_image_count": 0,
+                    }
+                hits = (
+                    paper_retriever.related(resolution.matched.pmid, limit=10)
+                    if paper_request.intent == "related_papers"
+                    else [resolution.matched]
+                )
+            else:
+                history_window = query_message_window(body["messages"])
+                query_response = await generate_queries(
+                    {
+                        "model": body["model"],
+                        "messages": history_window.messages,
+                        "type": "retrieval",
+                    },
+                    user,
+                )
+                generated = query_response["choices"][0]["message"]["content"]
+                processed = SYNBIO_RETRIEVAL.process_generated_query(
+                    original_query, generated
+                )
+                hits = paper_retriever.search(processed.semantic_query, limit=10)
+
+            sources = _paper_search_sources(hits)
+            log.info(
+                "[PERF] paper.route route=%s identifier=%s papers=%d "
+                "duration=%.3fs",
+                paper_request.intent,
+                paper_request.identifier_type,
+                len(hits),
+                time.perf_counter() - started,
+            )
+            return body, {
+                "sources": sources,
+                "paper_route": paper_request.intent,
+                "user_image_count": 0,
+            }
+        except LookupError:
+            log.info(
+                "[PERF] paper.route route=%s identifier=%s papers=0 "
+                "duration=%.3fs",
+                paper_request.intent,
+                paper_request.identifier_type,
+                time.perf_counter() - started,
+            )
+            return body, {
+                "sources": [],
+                "no_evidence": True,
+                "no_evidence_reason": "paper_not_found",
+                "user_image_count": 0,
+            }
+        except Exception:
+            log.exception("SPECTER2 paper route failed")
+            return body, {
+                "sources": [],
+                "no_evidence": True,
+                "no_evidence_reason": "paper_search_error",
+                "user_image_count": 0,
+            }
 
     files = add_default_knowledge(
         metadata.get("files"),
@@ -982,6 +1124,36 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
             log.info(
                 "[PERF] rag.route route=plain_chat sources=0 first_user=%s",
                 first_user_message,
+            )
+        elif file_flags.get("paper_title_ambiguous"):
+            if sources:
+                log.warning(
+                    "Paper-title confirmation ignored %d source groups produced "
+                    "by tools",
+                    len(sources),
+                )
+                sources = []
+            candidates = file_flags.get("paper_title_candidates") or []
+            candidate_lines = "\n".join(
+                f"- {item.get('title', '')} (PMID: {item.get('pmid', '')})"
+                for item in candidates
+            )
+            confirmation_prompt = PAPER_TITLE_CONFIRMATION_PROMPT.format(
+                candidates=candidate_lines
+            )
+            if model["owned_by"] == "ollama":
+                body["messages"] = prepend_to_first_user_message_content(
+                    confirmation_prompt,
+                    body["messages"],
+                )
+            else:
+                body["messages"] = add_or_update_system_message(
+                    confirmation_prompt,
+                    body["messages"],
+                )
+            log.info(
+                "[PERF] paper.route route=title_confirmation candidates=%d",
+                len(candidates),
             )
         elif len(sources) > 0:
             # The unchanged RAG block below handles source-backed messages.
